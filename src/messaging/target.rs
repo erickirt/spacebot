@@ -118,6 +118,25 @@ pub fn resolve_broadcast_target(channel: &ChannelInfo) -> Option<BroadcastTarget
                 .and_then(normalize_email_target)
                 .or_else(|| from.as_deref().and_then(normalize_email_target))?
         }
+        "mattermost" => {
+            if let Some(channel_id) = channel
+                .platform_meta
+                .as_ref()
+                .and_then(|meta| meta.get("mattermost_channel_id"))
+                .and_then(json_value_to_string)
+            {
+                channel_id
+            } else {
+                // conversation id: mattermost:{team_id}:{channel_id}
+                // or mattermost:{team_id}:dm:{user_id}
+                let parts: Vec<&str> = channel.id.split(':').collect();
+                match parts.as_slice() {
+                    ["mattermost", _team_id, "dm", user_id] => format!("dm:{user_id}"),
+                    ["mattermost", _team_id, channel_id] => (*channel_id).to_string(),
+                    _ => return None,
+                }
+            }
+        }
         _ => return None,
     };
 
@@ -141,6 +160,7 @@ fn normalize_target(adapter: &str, raw_target: &str) -> Option<String> {
         "telegram" => normalize_telegram_target(trimmed),
         "twitch" => normalize_twitch_target(trimmed),
         "email" => normalize_email_target(trimmed),
+        "mattermost" => normalize_mattermost_target(trimmed),
         _ => Some(trimmed.to_string()),
     }
 }
@@ -210,6 +230,16 @@ fn normalize_twitch_target(raw_target: &str) -> Option<String> {
         None
     } else {
         Some(channel_login.to_string())
+    }
+}
+
+fn normalize_mattermost_target(raw_target: &str) -> Option<String> {
+    let target = strip_repeated_prefix(raw_target, "mattermost");
+    // Accept channel IDs (opaque alphanumeric strings) and dm:user_id patterns
+    if target.is_empty() {
+        None
+    } else {
+        Some(target.to_string())
     }
 }
 

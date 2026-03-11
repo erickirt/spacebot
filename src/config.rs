@@ -1371,6 +1371,8 @@ pub struct Binding {
     pub guild_id: Option<String>,
     pub workspace_id: Option<String>, // Slack workspace (team) ID
     pub chat_id: Option<String>,
+    /// Mattermost team ID filter.
+    pub team_id: Option<String>,
     /// Channel IDs this binding applies to. If empty, all channels in the guild/workspace are allowed.
     pub channel_ids: Vec<String>,
     /// Require explicit @mention (or reply-to-bot) for inbound messages.
@@ -1448,7 +1450,7 @@ impl Binding {
                 .and_then(|v| v.as_u64())
                 .map(|v| v.to_string());
 
-            // Also check Slack and Twitch channel IDs
+            // Also check Slack, Twitch, and Mattermost channel IDs
             let slack_channel = message
                 .metadata
                 .get("slack_channel_id")
@@ -1457,18 +1459,37 @@ impl Binding {
                 .metadata
                 .get("twitch_channel")
                 .and_then(|v| v.as_str());
+            let mattermost_channel = message
+                .metadata
+                .get("mattermost_channel_id")
+                .and_then(|v| v.as_str());
 
             let direct_match = message_channel
                 .as_ref()
                 .is_some_and(|id| self.channel_ids.contains(id))
                 || slack_channel.is_some_and(|id| self.channel_ids.contains(&id.to_string()))
-                || twitch_channel.is_some_and(|id| self.channel_ids.contains(&id.to_string()));
+                || twitch_channel.is_some_and(|id| self.channel_ids.contains(&id.to_string()))
+                || mattermost_channel
+                    .is_some_and(|id| self.channel_ids.contains(&id.to_string()));
             let parent_match = parent_channel
                 .as_ref()
                 .is_some_and(|id| self.channel_ids.contains(id));
 
             if !direct_match && !parent_match {
                 return false;
+            }
+        }
+
+        // Mattermost team filter
+        if let Some(team_id) = &self.team_id {
+            if self.channel == "mattermost" {
+                let message_team = message
+                    .metadata
+                    .get("mattermost_team_id")
+                    .and_then(|v| v.as_str());
+                if message_team != Some(team_id.as_str()) {
+                    return false;
+                }
             }
         }
 
@@ -1534,7 +1555,7 @@ struct AdapterValidationState {
 fn is_named_adapter_platform(platform: &str) -> bool {
     matches!(
         platform,
-        "discord" | "slack" | "telegram" | "twitch" | "email"
+        "discord" | "slack" | "telegram" | "twitch" | "email" | "mattermost"
     )
 }
 
@@ -1697,7 +1718,50 @@ fn build_adapter_validation_states(
         );
     }
 
+    if let Some(mattermost) = &messaging.mattermost {
+        let named_instances = validate_instance_names(
+            "mattermost",
+            mattermost.instances.iter().map(|i| i.name.as_str()),
+        )?;
+        let default_present =
+            !mattermost.base_url.trim().is_empty() && !mattermost.token.trim().is_empty();
+        validate_runtime_keys("mattermost", default_present, &named_instances)?;
+        if default_present {
+            validate_mattermost_url(&mattermost.base_url)?;
+        }
+        for instance in &mattermost.instances {
+            if instance.enabled && !instance.base_url.is_empty() {
+                validate_mattermost_url(&instance.base_url)?;
+            }
+        }
+        states.insert(
+            "mattermost",
+            AdapterValidationState {
+                default_present,
+                named_instances,
+            },
+        );
+    }
+
     Ok(states)
+}
+
+fn validate_mattermost_url(url: &str) -> Result<()> {
+    let parsed = url::Url::parse(url)
+        .map_err(|e| ConfigError::Invalid(format!("invalid mattermost base_url '{url}': {e}")))?;
+    match parsed.scheme() {
+        "https" => {}
+        "http" => {
+            tracing::warn!(url, "mattermost base_url uses http instead of https");
+        }
+        scheme => {
+            return Err(ConfigError::Invalid(format!(
+                "mattermost base_url must use http or https, got: {scheme}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
 }
 
 fn validate_instance_names<'a>(
@@ -1800,6 +1864,7 @@ pub struct MessagingConfig {
     pub email: Option<EmailConfig>,
     pub webhook: Option<WebhookConfig>,
     pub twitch: Option<TwitchConfig>,
+    pub mattermost: Option<MattermostConfig>,
 }
 
 #[derive(Clone)]
@@ -2618,6 +2683,146 @@ fn binding_adapter_selector_matches(binding: &Binding, adapter_selector: Option<
     }
 }
 
+/// Mattermost bot configuration.
+#[derive(Clone)]
+pub struct MattermostConfig {
+    pub enabled: bool,
+    pub base_url: String,
+    pub token: String,
+    pub team_id: Option<String>,
+    pub instances: Vec<MattermostInstanceConfig>,
+    pub dm_allowed_users: Vec<String>,
+    pub max_attachment_bytes: usize,
+}
+
+impl std::fmt::Debug for MattermostConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MattermostConfig")
+            .field("enabled", &self.enabled)
+            .field("base_url", &self.base_url)
+            .field("token", &"[REDACTED]")
+            .field("team_id", &self.team_id)
+            .field("instances", &self.instances)
+            .field("dm_allowed_users", &self.dm_allowed_users)
+            .field("max_attachment_bytes", &self.max_attachment_bytes)
+            .finish()
+    }
+}
+
+/// Named Mattermost bot instance configuration.
+#[derive(Clone)]
+pub struct MattermostInstanceConfig {
+    pub name: String,
+    pub enabled: bool,
+    pub base_url: String,
+    pub token: String,
+    pub team_id: Option<String>,
+    pub dm_allowed_users: Vec<String>,
+    pub max_attachment_bytes: usize,
+}
+
+impl std::fmt::Debug for MattermostInstanceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MattermostInstanceConfig")
+            .field("name", &self.name)
+            .field("enabled", &self.enabled)
+            .field("base_url", &self.base_url)
+            .field("token", &"[REDACTED]")
+            .field("team_id", &self.team_id)
+            .field("dm_allowed_users", &self.dm_allowed_users)
+            .field("max_attachment_bytes", &self.max_attachment_bytes)
+            .finish()
+    }
+}
+
+/// Per-adapter permissions for the Mattermost platform.
+///
+/// Shared with the Mattermost adapter via `Arc<ArcSwap<..>>` for hot-reloading.
+#[derive(Debug, Clone, Default)]
+pub struct MattermostPermissions {
+    /// Allowed team IDs (None = all teams accepted).
+    pub team_filter: Option<Vec<String>>,
+    /// Allowed channel IDs per team (empty = all channels accepted).
+    pub channel_filter: HashMap<String, Vec<String>>,
+    /// User IDs allowed to DM the bot.
+    pub dm_allowed_users: Vec<String>,
+}
+
+impl MattermostPermissions {
+    /// Build from the current config's mattermost settings and bindings.
+    pub fn from_config(config: &MattermostConfig, bindings: &[Binding]) -> Self {
+        Self::from_bindings_for_adapter(config.dm_allowed_users.clone(), bindings, None)
+    }
+
+    /// Build permissions for a named Mattermost adapter instance.
+    pub fn from_instance_config(
+        instance: &MattermostInstanceConfig,
+        bindings: &[Binding],
+    ) -> Self {
+        Self::from_bindings_for_adapter(
+            instance.dm_allowed_users.clone(),
+            bindings,
+            Some(instance.name.as_str()),
+        )
+    }
+
+    fn from_bindings_for_adapter(
+        seed_dm_allowed_users: Vec<String>,
+        bindings: &[Binding],
+        adapter_selector: Option<&str>,
+    ) -> Self {
+        let mm_bindings: Vec<&Binding> = bindings
+            .iter()
+            .filter(|b| {
+                b.channel == "mattermost"
+                    && binding_adapter_selector_matches(b, adapter_selector)
+            })
+            .collect();
+
+        let team_filter = {
+            let team_ids: Vec<String> = mm_bindings
+                .iter()
+                .filter_map(|b| b.team_id.clone())
+                .collect();
+            if team_ids.is_empty() {
+                None
+            } else {
+                Some(team_ids)
+            }
+        };
+
+        let channel_filter = {
+            let mut filter: HashMap<String, Vec<String>> = HashMap::new();
+            for binding in &mm_bindings {
+                if let Some(team_id) = &binding.team_id {
+                    if !binding.channel_ids.is_empty() {
+                        filter
+                            .entry(team_id.clone())
+                            .or_default()
+                            .extend(binding.channel_ids.clone());
+                    }
+                }
+            }
+            filter
+        };
+
+        let mut dm_allowed_users = seed_dm_allowed_users;
+        for binding in &mm_bindings {
+            for id in &binding.dm_allowed_users {
+                if !dm_allowed_users.contains(id) {
+                    dm_allowed_users.push(id.clone());
+                }
+            }
+        }
+
+        Self {
+            team_filter,
+            channel_filter,
+            dm_allowed_users,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WebhookConfig {
     pub enabled: bool,
@@ -3086,6 +3291,7 @@ struct TomlMessagingConfig {
     email: Option<TomlEmailConfig>,
     webhook: Option<TomlWebhookConfig>,
     twitch: Option<TomlTwitchConfig>,
+    mattermost: Option<TomlMattermostConfig>,
 }
 
 #[derive(Deserialize)]
@@ -3284,6 +3490,39 @@ fn default_webhook_bind() -> String {
     "127.0.0.1".into()
 }
 
+#[derive(Deserialize)]
+struct TomlMattermostConfig {
+    #[serde(default)]
+    enabled: bool,
+    base_url: Option<String>,
+    token: Option<String>,
+    team_id: Option<String>,
+    #[serde(default)]
+    instances: Vec<TomlMattermostInstanceConfig>,
+    #[serde(default)]
+    dm_allowed_users: Vec<String>,
+    #[serde(default = "default_max_attachment_bytes")]
+    max_attachment_bytes: usize,
+}
+
+#[derive(Deserialize)]
+struct TomlMattermostInstanceConfig {
+    name: String,
+    #[serde(default)]
+    enabled: bool,
+    base_url: Option<String>,
+    token: Option<String>,
+    team_id: Option<String>,
+    #[serde(default)]
+    dm_allowed_users: Vec<String>,
+    #[serde(default = "default_max_attachment_bytes")]
+    max_attachment_bytes: usize,
+}
+
+fn default_max_attachment_bytes() -> usize {
+    10 * 1024 * 1024
+}
+
 fn default_email_imap_port() -> u16 {
     993
 }
@@ -3325,6 +3564,8 @@ struct TomlBinding {
     guild_id: Option<String>,
     workspace_id: Option<String>,
     chat_id: Option<String>,
+    #[serde(default)]
+    team_id: Option<String>,
     #[serde(default)]
     channel_ids: Vec<String>,
     #[serde(default)]
@@ -5457,6 +5698,53 @@ impl Config {
                     trigger_prefix: t.trigger_prefix,
                 })
             }),
+            mattermost: toml.messaging.mattermost.and_then(|mm| {
+                let instances = mm
+                    .instances
+                    .into_iter()
+                    .map(|instance| {
+                        let token = instance.token.as_deref().and_then(resolve_env_value);
+                        let base_url = instance.base_url.as_deref().and_then(resolve_env_value);
+                        if instance.enabled && (token.is_none() || base_url.is_none()) {
+                            tracing::warn!(
+                                adapter = %instance.name,
+                                "mattermost instance is enabled but credentials are missing/unresolvable — disabling"
+                            );
+                        }
+                        let has_credentials = token.is_some() && base_url.is_some();
+                        MattermostInstanceConfig {
+                            name: instance.name,
+                            enabled: instance.enabled && has_credentials,
+                            base_url: base_url.unwrap_or_default(),
+                            token: token.unwrap_or_default(),
+                            team_id: instance.team_id,
+                            dm_allowed_users: instance.dm_allowed_users,
+                            max_attachment_bytes: instance.max_attachment_bytes,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                let token = std::env::var("MATTERMOST_TOKEN")
+                    .ok()
+                    .or_else(|| mm.token.as_deref().and_then(resolve_env_value));
+                let base_url = std::env::var("MATTERMOST_BASE_URL")
+                    .ok()
+                    .or_else(|| mm.base_url.as_deref().and_then(resolve_env_value));
+
+                if (token.is_none() || base_url.is_none()) && instances.is_empty() {
+                    return None;
+                }
+
+                Some(MattermostConfig {
+                    enabled: mm.enabled,
+                    base_url: base_url.unwrap_or_default(),
+                    token: token.unwrap_or_default(),
+                    team_id: mm.team_id,
+                    instances,
+                    dm_allowed_users: mm.dm_allowed_users,
+                    max_attachment_bytes: mm.max_attachment_bytes,
+                })
+            }),
         };
 
         let bindings: Vec<Binding> = toml
@@ -5469,6 +5757,7 @@ impl Config {
                 guild_id: b.guild_id,
                 workspace_id: b.workspace_id,
                 chat_id: b.chat_id,
+                team_id: b.team_id,
                 channel_ids: b.channel_ids,
                 require_mention: b.require_mention,
                 dm_allowed_users: b.dm_allowed_users,
@@ -5836,6 +6125,7 @@ pub fn spawn_file_watcher(
     slack_permissions: Option<Arc<arc_swap::ArcSwap<SlackPermissions>>>,
     telegram_permissions: Option<Arc<arc_swap::ArcSwap<TelegramPermissions>>>,
     twitch_permissions: Option<Arc<arc_swap::ArcSwap<TwitchPermissions>>>,
+    mattermost_permissions: Option<Arc<arc_swap::ArcSwap<MattermostPermissions>>>,
     bindings: Arc<arc_swap::ArcSwap<Vec<Binding>>>,
     messaging_manager: Option<Arc<crate::messaging::MessagingManager>>,
     llm_manager: Arc<crate::llm::LlmManager>,
@@ -6039,6 +6329,14 @@ pub fn spawn_file_watcher(
                     tracing::info!("twitch permissions reloaded");
                 }
 
+                if let Some(ref perms) = mattermost_permissions
+                    && let Some(mattermost_config) = &config.messaging.mattermost
+                {
+                    let new_perms = MattermostPermissions::from_config(mattermost_config, &config.bindings);
+                    perms.store(Arc::new(new_perms));
+                    tracing::info!("mattermost permissions reloaded");
+                }
+
                 // Hot-start adapters that are newly enabled in the config
                 if let Some(ref manager) = messaging_manager {
                     let rt = tokio::runtime::Handle::current();
@@ -6048,6 +6346,7 @@ pub fn spawn_file_watcher(
                     let slack_permissions = slack_permissions.clone();
                     let telegram_permissions = telegram_permissions.clone();
                     let twitch_permissions = twitch_permissions.clone();
+                    let mattermost_permissions = mattermost_permissions.clone();
                     let instance_dir = instance_dir.clone();
 
                     rt.spawn(async move {
@@ -6327,6 +6626,71 @@ pub fn spawn_file_watcher(
                                     );
                                     if let Err(error) = manager.register_and_start(adapter).await {
                                         tracing::error!(%error, adapter = %instance.name, "failed to hot-start named twitch adapter from config change");
+                                    }
+                                }
+                            }
+
+                        if let Some(mattermost_config) = &config.messaging.mattermost
+                            && mattermost_config.enabled {
+                                if !mattermost_config.base_url.is_empty()
+                                    && !mattermost_config.token.is_empty()
+                                    && !manager.has_adapter("mattermost").await
+                                {
+                                    let permissions = match mattermost_permissions {
+                                        Some(ref existing) => existing.clone(),
+                                        None => {
+                                            let permissions = MattermostPermissions::from_config(mattermost_config, &config.bindings);
+                                            Arc::new(arc_swap::ArcSwap::from_pointee(permissions))
+                                        }
+                                    };
+                                    match crate::messaging::mattermost::MattermostAdapter::new(
+                                        "mattermost",
+                                        &mattermost_config.base_url,
+                                        mattermost_config.token.as_str(),
+                                        mattermost_config.team_id.as_deref().map(Arc::from),
+                                        mattermost_config.max_attachment_bytes,
+                                        permissions,
+                                    ) {
+                                        Ok(adapter) => {
+                                            if let Err(error) = manager.register_and_start(adapter).await {
+                                                tracing::error!(%error, "failed to hot-start mattermost adapter from config change");
+                                            }
+                                        }
+                                        Err(error) => {
+                                            tracing::error!(%error, "failed to create mattermost adapter for hot-start");
+                                        }
+                                    }
+                                }
+
+                                for instance in mattermost_config.instances.iter().filter(|instance| instance.enabled) {
+                                    let runtime_key = binding_runtime_adapter_key(
+                                        "mattermost",
+                                        Some(instance.name.as_str()),
+                                    );
+                                    if manager.has_adapter(runtime_key.as_str()).await {
+                                        // TODO: named instance permissions not hot-updated (see discord block comment)
+                                        continue;
+                                    }
+
+                                    let permissions = Arc::new(arc_swap::ArcSwap::from_pointee(
+                                        MattermostPermissions::from_instance_config(instance, &config.bindings),
+                                    ));
+                                    match crate::messaging::mattermost::MattermostAdapter::new(
+                                        runtime_key,
+                                        &instance.base_url,
+                                        instance.token.as_str(),
+                                        instance.team_id.as_deref().map(Arc::from),
+                                        instance.max_attachment_bytes,
+                                        permissions,
+                                    ) {
+                                        Ok(adapter) => {
+                                            if let Err(error) = manager.register_and_start(adapter).await {
+                                                tracing::error!(%error, adapter = %instance.name, "failed to hot-start named mattermost adapter from config change");
+                                            }
+                                        }
+                                        Err(error) => {
+                                            tracing::error!(%error, adapter = %instance.name, "failed to create named mattermost adapter for hot-start");
+                                        }
                                     }
                                 }
                             }
@@ -7180,6 +7544,7 @@ bind = "127.0.0.1"
             guild_id: None,
             workspace_id: workspace_id.map(String::from),
             chat_id: None,
+            team_id: None,
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users,
@@ -7926,6 +8291,7 @@ startup_delay_secs = 2
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            team_id: None,
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
@@ -7942,6 +8308,7 @@ startup_delay_secs = 2
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            team_id: None,
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
@@ -7973,6 +8340,7 @@ startup_delay_secs = 2
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            team_id: None,
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
@@ -7990,6 +8358,7 @@ startup_delay_secs = 2
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            team_id: None,
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
@@ -8007,6 +8376,7 @@ startup_delay_secs = 2
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            team_id: None,
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
@@ -8024,6 +8394,7 @@ startup_delay_secs = 2
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            team_id: None,
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
@@ -8041,6 +8412,7 @@ startup_delay_secs = 2
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            team_id: None,
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
@@ -8068,6 +8440,7 @@ startup_delay_secs = 2
             email: None,
             webhook: None,
             twitch: None,
+            mattermost: None,
         };
         let bindings = vec![
             Binding {
@@ -8077,6 +8450,7 @@ startup_delay_secs = 2
                 guild_id: None,
                 workspace_id: None,
                 chat_id: None,
+                team_id: None,
                 channel_ids: vec![],
                 require_mention: false,
                 dm_allowed_users: vec![],
@@ -8088,6 +8462,7 @@ startup_delay_secs = 2
                 guild_id: None,
                 workspace_id: None,
                 chat_id: None,
+                team_id: None,
                 channel_ids: vec![],
                 require_mention: false,
                 dm_allowed_users: vec![],
@@ -8110,6 +8485,7 @@ startup_delay_secs = 2
             email: None,
             webhook: None,
             twitch: None,
+            mattermost: None,
         };
         let bindings = vec![Binding {
             agent_id: "main".into(),
@@ -8118,6 +8494,7 @@ startup_delay_secs = 2
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            team_id: None,
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
@@ -8172,6 +8549,7 @@ startup_delay_secs = 2
             }),
             webhook: None,
             twitch: None,
+            mattermost: None,
         };
         let bindings = vec![Binding {
             agent_id: "main".into(),
@@ -8180,6 +8558,7 @@ startup_delay_secs = 2
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            team_id: None,
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
@@ -8206,6 +8585,7 @@ startup_delay_secs = 2
             email: None,
             webhook: None,
             twitch: None,
+            mattermost: None,
         };
         // Binding targets default adapter, but no default credentials exist
         let bindings = vec![Binding {
@@ -8215,6 +8595,7 @@ startup_delay_secs = 2
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            team_id: None,
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],

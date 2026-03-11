@@ -1,0 +1,1031 @@
+//! Mattermost messaging adapter using a custom HTTP + WebSocket client.
+
+use crate::config::MattermostPermissions;
+use crate::messaging::apply_runtime_adapter_to_conversation_id;
+use crate::messaging::traits::{HistoryMessage, InboundStream, Messaging};
+use crate::{InboundMessage, MessageContent, OutboundResponse, StatusUpdate};
+
+use anyhow::Context as _;
+use arc_swap::ArcSwap;
+use futures::{SinkExt, StreamExt};
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::{OnceCell, RwLock, mpsc};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::Message as WsMessage,
+};
+use url::Url;
+
+const MAX_MESSAGE_LENGTH: usize = 16_383;
+const STREAM_EDIT_THROTTLE: Duration = Duration::from_millis(500);
+const TYPING_INDICATOR_INTERVAL: Duration = Duration::from_secs(5);
+const WS_RECONNECT_BASE_DELAY: Duration = Duration::from_secs(1);
+const WS_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(60);
+const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub struct MattermostAdapter {
+    runtime_key: Arc<str>,
+    base_url: Url,
+    token: Arc<str>,
+    default_team_id: Option<Arc<str>>,
+    max_attachment_bytes: usize,
+    client: Client,
+    permissions: Arc<ArcSwap<MattermostPermissions>>,
+    bot_user_id: OnceCell<Arc<str>>,
+    bot_username: OnceCell<Arc<str>>,
+    active_messages: Arc<RwLock<HashMap<String, ActiveStream>>>,
+    typing_tasks: Arc<RwLock<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    shutdown_tx: Arc<RwLock<Option<mpsc::Sender<()>>>>,
+    ws_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+}
+
+struct ActiveStream {
+    post_id: Arc<str>,
+    #[allow(dead_code)]
+    channel_id: Arc<str>,
+    last_edit: Instant,
+    accumulated_text: String,
+}
+
+impl std::fmt::Debug for MattermostAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MattermostAdapter")
+            .field("runtime_key", &self.runtime_key)
+            .field("base_url", &self.base_url)
+            .field("token", &"[REDACTED]")
+            .field("default_team_id", &self.default_team_id)
+            .field("max_attachment_bytes", &self.max_attachment_bytes)
+            .finish()
+    }
+}
+
+impl MattermostAdapter {
+    pub fn new(
+        runtime_key: impl Into<Arc<str>>,
+        base_url: &str,
+        token: impl Into<Arc<str>>,
+        default_team_id: Option<Arc<str>>,
+        max_attachment_bytes: usize,
+        permissions: Arc<ArcSwap<MattermostPermissions>>,
+    ) -> anyhow::Result<Self> {
+        let base_url =
+            Url::parse(base_url).context("invalid mattermost base_url")?;
+
+        let client = Client::builder()
+            .timeout(HTTP_TIMEOUT)
+            .pool_idle_timeout(Duration::from_secs(30))
+            .build()
+            .context("failed to build HTTP client")?;
+
+        Ok(Self {
+            runtime_key: runtime_key.into(),
+            base_url,
+            token: token.into(),
+            default_team_id,
+            max_attachment_bytes,
+            client,
+            permissions,
+            bot_user_id: OnceCell::new(),
+            bot_username: OnceCell::new(),
+            active_messages: Arc::new(RwLock::new(HashMap::new())),
+            typing_tasks: Arc::new(RwLock::new(HashMap::new())),
+            shutdown_tx: Arc::new(RwLock::new(None)),
+            ws_task: Arc::new(RwLock::new(None)),
+        })
+    }
+
+    fn api_url(&self, path: &str) -> Url {
+        let mut url = self.base_url.clone();
+        url.path_segments_mut()
+            .expect("base_url is a valid base URL")
+            .extend(["api", "v4"])
+            .extend(path.trim_start_matches('/').split('/'));
+        url
+    }
+
+    fn ws_url(&self) -> Url {
+        let mut url = self.base_url.clone();
+        url.set_scheme(match self.base_url.scheme() {
+            "https" => "wss",
+            "http" => "ws",
+            other => other,
+        })
+        .expect("scheme substitution is valid");
+        url.path_segments_mut()
+            .expect("base_url is a valid base URL")
+            .extend(["api", "v4", "websocket"]);
+        url
+    }
+
+    fn extract_channel_id<'a>(&self, message: &'a InboundMessage) -> crate::Result<&'a str> {
+        message
+            .metadata
+            .get("mattermost_channel_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!("missing mattermost_channel_id metadata").into()
+            })
+    }
+
+    fn validate_id(id: &str) -> crate::Result<()> {
+        if id.is_empty() || id.len() > 64 {
+            return Err(anyhow::anyhow!("invalid mattermost ID: empty or too long").into());
+        }
+        if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return Err(anyhow::anyhow!("invalid mattermost ID format: {id}").into());
+        }
+        Ok(())
+    }
+
+    async fn stop_typing(&self, channel_id: &str) {
+        if let Some(handle) = self.typing_tasks.write().await.remove(channel_id) {
+            handle.abort();
+        }
+    }
+
+    async fn start_typing(&self, channel_id: &str) {
+        let Some(user_id) = self.bot_user_id.get().cloned() else {
+            return;
+        };
+        let channel_id_owned = channel_id.to_string();
+        let client = self.client.clone();
+        let token = self.token.clone();
+        let url = self.api_url(&format!("/users/{user_id}/typing"));
+
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(TYPING_INDICATOR_INTERVAL);
+            loop {
+                interval.tick().await;
+                let result = client
+                    .post(url.clone())
+                    .bearer_auth(token.as_ref())
+                    .json(&serde_json::json!({
+                        "channel_id": channel_id_owned,
+                        "parent_id": "",
+                    }))
+                    .send()
+                    .await;
+                if let Err(error) = result {
+                    tracing::warn!(%error, "typing indicator request failed");
+                }
+            }
+        });
+
+        self.typing_tasks
+            .write()
+            .await
+            .insert(channel_id.to_string(), handle);
+    }
+
+    async fn create_post(
+        &self,
+        channel_id: &str,
+        message: &str,
+        root_id: Option<&str>,
+    ) -> crate::Result<MattermostPost> {
+        Self::validate_id(channel_id)?;
+        if let Some(rid) = root_id {
+            Self::validate_id(rid)?;
+        }
+
+        let response = self
+            .client
+            .post(self.api_url("/posts"))
+            .bearer_auth(self.token.as_ref())
+            .json(&serde_json::json!({
+                "channel_id": channel_id,
+                "message": message,
+                "root_id": root_id.unwrap_or(""),
+            }))
+            .send()
+            .await
+            .context("failed to create post")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "mattermost POST /posts failed with status {}: {body}",
+                status.as_u16()
+            )
+            .into());
+        }
+
+        response
+            .json()
+            .await
+            .context("failed to parse post response")
+            .map_err(Into::into)
+    }
+
+    async fn edit_post(&self, post_id: &str, message: &str) -> crate::Result<()> {
+        Self::validate_id(post_id)?;
+
+        let response = self
+            .client
+            .put(self.api_url(&format!("/posts/{post_id}")))
+            .bearer_auth(self.token.as_ref())
+            .json(&serde_json::json!({ "message": message }))
+            .send()
+            .await
+            .context("failed to edit post")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "mattermost PUT /posts/{post_id} failed with status {}: {body}",
+                status.as_u16()
+            )
+            .into());
+        }
+
+        Ok(())
+    }
+
+    async fn get_channel_posts(
+        &self,
+        channel_id: &str,
+        before_post_id: Option<&str>,
+        limit: u32,
+    ) -> crate::Result<MattermostPostList> {
+        Self::validate_id(channel_id)?;
+
+        let mut url = self.api_url(&format!("/channels/{channel_id}/posts"));
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("page", "0");
+            query.append_pair("per_page", &limit.to_string());
+            if let Some(before) = before_post_id {
+                query.append_pair("before", before);
+            }
+        }
+
+        let response = self
+            .client
+            .get(url)
+            .bearer_auth(self.token.as_ref())
+            .send()
+            .await
+            .context("failed to fetch channel posts")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "mattermost GET /channels/{channel_id}/posts failed with status {}: {body}",
+                status.as_u16()
+            )
+            .into());
+        }
+
+        response
+            .json()
+            .await
+            .context("failed to parse posts response")
+            .map_err(Into::into)
+    }
+}
+
+impl Messaging for MattermostAdapter {
+    fn name(&self) -> &str {
+        &self.runtime_key
+    }
+
+    async fn start(&self) -> crate::Result<InboundStream> {
+        let (inbound_tx, inbound_rx) = mpsc::channel(256);
+        let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+        *self.shutdown_tx.write().await = Some(shutdown_tx);
+
+        let me: MattermostUser = self
+            .client
+            .get(self.api_url("/users/me"))
+            .bearer_auth(self.token.as_ref())
+            .send()
+            .await
+            .context("failed to get bot user")?
+            .json()
+            .await
+            .context("failed to parse user response")?;
+
+        let user_id: Arc<str> = me.id.clone().into();
+        let username: Arc<str> = me.username.clone().into();
+
+        self.bot_user_id.set(user_id.clone()).ok();
+        self.bot_username.set(username.clone()).ok();
+
+        tracing::info!(
+            adapter = %self.runtime_key,
+            bot_id = %user_id,
+            bot_username = %username,
+            "mattermost adapter connected"
+        );
+
+        let ws_url = self.ws_url();
+        let runtime_key = self.runtime_key.clone();
+        let token = self.token.clone();
+        let permissions = self.permissions.clone();
+        let bot_user_id = user_id;
+        let inbound_tx_clone = inbound_tx.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut retry_delay = WS_RECONNECT_BASE_DELAY;
+
+            loop {
+                let connect_result = connect_async(ws_url.as_str()).await;
+
+                match connect_result {
+                    Ok((ws_stream, _)) => {
+                        retry_delay = WS_RECONNECT_BASE_DELAY;
+
+                        let (mut write, mut read) = ws_stream.split();
+
+                        let auth_msg = serde_json::json!({
+                            "seq": 1,
+                            "action": "authentication_challenge",
+                            "data": {"token": token.as_ref()}
+                        });
+
+                        if let Ok(msg) = serde_json::to_string(&auth_msg) {
+                            if write.send(WsMessage::Text(msg.into())).await.is_err() {
+                                tracing::error!(adapter = %runtime_key, "failed to send websocket auth");
+                                continue;
+                            }
+                        }
+
+                        loop {
+                            tokio::select! {
+                                _ = shutdown_rx.recv() => {
+                                    tracing::info!(adapter = %runtime_key, "mattermost websocket shutting down");
+                                    let _ = write.send(WsMessage::Close(None)).await;
+                                    return;
+                                }
+
+                                msg = read.next() => {
+                                    match msg {
+                                        Some(Ok(WsMessage::Text(text))) => {
+                                            if let Ok(event) = serde_json::from_str::<MattermostWsEvent>(&text) {
+                                                if event.event == "posted" {
+                                                    // The post is double-encoded as a JSON string in the data field.
+                                                    let post_result = event
+                                                        .data
+                                                        .get("post")
+                                                        .and_then(|v| v.as_str())
+                                                        .and_then(|s| serde_json::from_str::<MattermostPost>(s).ok());
+
+                                                    if let Some(mut post) = post_result {
+                                                        if post.user_id != bot_user_id.as_ref() {
+                                                            // channel_type comes from event.data, not the post struct.
+                                                            let channel_type = event
+                                                                .data
+                                                                .get("channel_type")
+                                                                .and_then(|v| v.as_str())
+                                                                .map(String::from);
+                                                            post.channel_type = channel_type;
+
+                                                            let team_id = event.broadcast.team_id.clone();
+                                                            let perms = permissions.load();
+                                                            if let Some(msg) = build_message_from_post(
+                                                                &post,
+                                                                &runtime_key,
+                                                                &bot_user_id,
+                                                                &team_id,
+                                                                &perms,
+                                                            ) {
+                                                                if inbound_tx_clone.send(msg).await.is_err() {
+                                                                    tracing::debug!("inbound channel closed");
+                                                                    return;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Some(Ok(WsMessage::Ping(data))) => {
+                                            if write.send(WsMessage::Pong(data)).await.is_err() {
+                                                tracing::warn!(adapter = %runtime_key, "failed to send pong");
+                                                break;
+                                            }
+                                        }
+                                        Some(Ok(WsMessage::Pong(_))) => {}
+                                        Some(Ok(WsMessage::Close(_))) => {
+                                            tracing::info!(adapter = %runtime_key, "websocket closed by server");
+                                            break;
+                                        }
+                                        Some(Err(e)) => {
+                                            tracing::error!(adapter = %runtime_key, error = %e, "websocket error");
+                                            break;
+                                        }
+                                        None => break,
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+
+                        tracing::info!(adapter = %runtime_key, "websocket disconnected, reconnecting...");
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            adapter = %runtime_key,
+                            error = %e,
+                            delay_ms = retry_delay.as_millis(),
+                            "websocket connection failed, retrying"
+                        );
+                    }
+                }
+
+                tokio::select! {
+                    _ = tokio::time::sleep(retry_delay) => {
+                        retry_delay = (retry_delay * 2).min(WS_RECONNECT_MAX_DELAY);
+                    }
+                    _ = shutdown_rx.recv() => {
+                        tracing::info!(adapter = %runtime_key, "mattermost adapter shutting down during reconnect delay");
+                        return;
+                    }
+                }
+            }
+        });
+
+        *self.ws_task.write().await = Some(handle);
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(inbound_rx);
+        Ok(Box::pin(stream))
+    }
+
+    async fn respond(
+        &self,
+        message: &InboundMessage,
+        response: OutboundResponse,
+    ) -> crate::Result<()> {
+        let channel_id = self.extract_channel_id(message)?;
+
+        match response {
+            OutboundResponse::Text(text) => {
+                self.stop_typing(channel_id).await;
+                // Use root_id for threading: prefer mattermost_root_id (when triggered from a
+                // threaded message) or REPLY_TO_MESSAGE_ID (set by channel.rs for branch/worker
+                // replies).
+                let root_id = message
+                    .metadata
+                    .get("mattermost_root_id")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        message
+                            .metadata
+                            .get(crate::metadata_keys::REPLY_TO_MESSAGE_ID)
+                            .and_then(|v| v.as_str())
+                    });
+
+                for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
+                    self.create_post(channel_id, &chunk, root_id).await?;
+                }
+            }
+
+            OutboundResponse::StreamStart => {
+                let root_id = message
+                    .metadata
+                    .get("mattermost_root_id")
+                    .and_then(|v| v.as_str());
+                self.start_typing(channel_id).await;
+                // Create a placeholder post with a zero-width space.
+                let post = self.create_post(channel_id, "\u{200B}", root_id).await?;
+                self.active_messages.write().await.insert(
+                    message.id.clone(),
+                    ActiveStream {
+                        post_id: post.id.into(),
+                        channel_id: channel_id.to_string().into(),
+                        last_edit: Instant::now(),
+                        accumulated_text: String::new(),
+                    },
+                );
+            }
+
+            OutboundResponse::StreamChunk(chunk) => {
+                let mut active_messages = self.active_messages.write().await;
+                if let Some(active) = active_messages.get_mut(&message.id) {
+                    active.accumulated_text.push_str(&chunk);
+
+                    if active.last_edit.elapsed() > STREAM_EDIT_THROTTLE {
+                        let display_text = if active.accumulated_text.len() > MAX_MESSAGE_LENGTH {
+                            let end = active
+                                .accumulated_text
+                                .floor_char_boundary(MAX_MESSAGE_LENGTH - 3);
+                            format!("{}...", &active.accumulated_text[..end])
+                        } else {
+                            active.accumulated_text.clone()
+                        };
+
+                        if let Err(error) = self.edit_post(&active.post_id, &display_text).await {
+                            tracing::warn!(%error, "failed to edit streaming message");
+                        }
+                        active.last_edit = Instant::now();
+                    }
+                }
+            }
+
+            OutboundResponse::StreamEnd => {
+                self.stop_typing(channel_id).await;
+                if let Some(active) = self.active_messages.write().await.remove(&message.id) {
+                    if let Err(error) =
+                        self.edit_post(&active.post_id, &active.accumulated_text).await
+                    {
+                        tracing::warn!(%error, "failed to finalize streaming message");
+                    }
+                }
+            }
+
+            OutboundResponse::Status(status) => self.send_status(message, status).await?,
+
+            OutboundResponse::Reaction(emoji) => {
+                let post_id = message
+                    .metadata
+                    .get("mattermost_post_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("missing mattermost_post_id metadata")
+                    })?;
+                let emoji_name = emoji.trim_matches(':');
+
+                let bot_user_id = self
+                    .bot_user_id
+                    .get()
+                    .map(|s| s.as_ref().to_string())
+                    .unwrap_or_default();
+
+                let response = self
+                    .client
+                    .post(self.api_url("/reactions"))
+                    .bearer_auth(self.token.as_ref())
+                    .json(&serde_json::json!({
+                        "user_id": bot_user_id,
+                        "post_id": post_id,
+                        "emoji_name": emoji_name,
+                    }))
+                    .send()
+                    .await
+                    .context("failed to add reaction")?;
+
+                if !response.status().is_success() {
+                    tracing::warn!(
+                        status = %response.status(),
+                        emoji = %emoji_name,
+                        "failed to add reaction"
+                    );
+                }
+            }
+
+            OutboundResponse::File {
+                filename,
+                data,
+                mime_type,
+                caption,
+            } => {
+                if data.len() > self.max_attachment_bytes {
+                    return Err(anyhow::anyhow!(
+                        "file too large: {} bytes (max: {})",
+                        data.len(),
+                        self.max_attachment_bytes
+                    )
+                    .into());
+                }
+
+                let part = reqwest::multipart::Part::bytes(data)
+                    .file_name(filename.clone())
+                    .mime_str(&mime_type)
+                    .context("invalid mime type")?;
+
+                let form = reqwest::multipart::Form::new()
+                    .part("files", part)
+                    .text("channel_id", channel_id.to_string());
+
+                let response = self
+                    .client
+                    .post(self.api_url("/files"))
+                    .bearer_auth(self.token.as_ref())
+                    .multipart(form)
+                    .send()
+                    .await
+                    .context("failed to upload file")?;
+
+                if !response.status().is_success() {
+                    let body = response.text().await.unwrap_or_default();
+                    return Err(anyhow::anyhow!(
+                        "mattermost file upload failed: {body}"
+                    )
+                    .into());
+                }
+
+                let upload: MattermostFileUpload = response
+                    .json()
+                    .await
+                    .context("failed to parse file upload response")?;
+
+                let file_ids: Vec<_> =
+                    upload.file_infos.iter().map(|f| f.id.as_str()).collect();
+                self.client
+                    .post(self.api_url("/posts"))
+                    .bearer_auth(self.token.as_ref())
+                    .json(&serde_json::json!({
+                        "channel_id": channel_id,
+                        "message": caption.unwrap_or_default(),
+                        "file_ids": file_ids,
+                    }))
+                    .send()
+                    .await
+                    .context("failed to create post with file")?;
+            }
+
+            _ => {
+                tracing::debug!(?response, "mattermost adapter does not support this response type");
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn send_status(
+        &self,
+        message: &InboundMessage,
+        status: StatusUpdate,
+    ) -> crate::Result<()> {
+        let channel_id = self.extract_channel_id(message)?;
+
+        match status {
+            StatusUpdate::Thinking => {
+                self.start_typing(channel_id).await;
+            }
+            StatusUpdate::StopTyping => {
+                self.stop_typing(channel_id).await;
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    async fn fetch_history(
+        &self,
+        message: &InboundMessage,
+        limit: usize,
+    ) -> crate::Result<Vec<HistoryMessage>> {
+        let channel_id = self.extract_channel_id(message)?;
+        let before_post_id = message
+            .metadata
+            .get("mattermost_post_id")
+            .and_then(|v| v.as_str());
+
+        let capped_limit = limit.min(200) as u32;
+        let posts = self
+            .get_channel_posts(channel_id, before_post_id, capped_limit)
+            .await?;
+
+        let bot_id = self
+            .bot_user_id
+            .get()
+            .map(|s| s.as_ref().to_string());
+
+        let mut posts_vec: Vec<_> = posts
+            .posts
+            .into_values()
+            .filter(|p| bot_id.as_deref() != Some(p.user_id.as_str()))
+            .collect();
+        posts_vec.sort_by_key(|p| p.create_at);
+
+        let history: Vec<HistoryMessage> = posts_vec
+            .into_iter()
+            .map(|p| HistoryMessage {
+                author: p.user_id,
+                content: p.message,
+                is_bot: false,
+            })
+            .collect();
+
+        Ok(history)
+    }
+
+    async fn health_check(&self) -> crate::Result<()> {
+        let response = self
+            .client
+            .get(self.api_url("/system/ping"))
+            .bearer_auth(self.token.as_ref())
+            .send()
+            .await
+            .context("health check request failed")?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "mattermost health check failed: status {}",
+                response.status()
+            )
+            .into());
+        }
+
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> crate::Result<()> {
+        if let Some(tx) = self.shutdown_tx.write().await.take() {
+            let _ = tx.send(()).await;
+        }
+
+        if let Some(handle) = self.ws_task.write().await.take() {
+            handle.abort();
+        }
+
+        self.typing_tasks.write().await.clear();
+        self.active_messages.write().await.clear();
+
+        tracing::info!(adapter = %self.runtime_key, "mattermost adapter shut down");
+        Ok(())
+    }
+
+    async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {
+        match response {
+            OutboundResponse::Text(text) => {
+                for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
+                    self.create_post(target, &chunk, None).await?;
+                }
+            }
+            OutboundResponse::File {
+                filename,
+                data,
+                mime_type,
+                caption,
+            } => {
+                if data.len() > self.max_attachment_bytes {
+                    return Err(anyhow::anyhow!(
+                        "file too large: {} bytes (max: {})",
+                        data.len(),
+                        self.max_attachment_bytes
+                    )
+                    .into());
+                }
+                let part = reqwest::multipart::Part::bytes(data)
+                    .file_name(filename)
+                    .mime_str(&mime_type)
+                    .context("invalid mime type")?;
+                let form = reqwest::multipart::Form::new()
+                    .part("files", part)
+                    .text("channel_id", target.to_string());
+                let upload: MattermostFileUpload = self
+                    .client
+                    .post(self.api_url("/files"))
+                    .bearer_auth(self.token.as_ref())
+                    .multipart(form)
+                    .send()
+                    .await
+                    .context("failed to upload file")?
+                    .json()
+                    .await
+                    .context("failed to parse file upload response")?;
+                let file_ids: Vec<_> =
+                    upload.file_infos.iter().map(|f| f.id.as_str()).collect();
+                self.client
+                    .post(self.api_url("/posts"))
+                    .bearer_auth(self.token.as_ref())
+                    .json(&serde_json::json!({
+                        "channel_id": target,
+                        "message": caption.unwrap_or_default(),
+                        "file_ids": file_ids,
+                    }))
+                    .send()
+                    .await
+                    .context("failed to create post with file")?;
+            }
+            other => {
+                tracing::debug!(?other, "mattermost broadcast does not support this response type");
+            }
+        }
+        Ok(())
+    }
+}
+
+fn build_message_from_post(
+    post: &MattermostPost,
+    runtime_key: &str,
+    bot_user_id: &str,
+    team_id: &Option<String>,
+    permissions: &MattermostPermissions,
+) -> Option<InboundMessage> {
+    if post.user_id == bot_user_id {
+        return None;
+    }
+
+    if let Some(team_filter) = &permissions.team_filter {
+        // Fail-closed: no team_id in the event → can't verify team → reject.
+        let Some(tid) = team_id else { return None };
+        if !team_filter.contains(tid) {
+            return None;
+        }
+    }
+
+    if !permissions.channel_filter.is_empty() {
+        // Fail-closed: no team_id → can't look up allowed channels → reject.
+        let Some(tid) = team_id else { return None };
+        if let Some(allowed_channels) = permissions.channel_filter.get(tid) {
+            if !allowed_channels.contains(&post.channel_id) {
+                return None;
+            }
+        }
+    }
+
+    // "D" = direct message, "G" = group DM
+    let conversation_id = if post.channel_type.as_deref() == Some("D") {
+        apply_runtime_adapter_to_conversation_id(
+            runtime_key,
+            format!(
+                "mattermost:{}:dm:{}",
+                team_id.as_deref().unwrap_or(""),
+                post.user_id
+            ),
+        )
+    } else {
+        apply_runtime_adapter_to_conversation_id(
+            runtime_key,
+            format!(
+                "mattermost:{}:{}",
+                team_id.as_deref().unwrap_or(""),
+                post.channel_id
+            ),
+        )
+    };
+
+    let mut metadata = HashMap::new();
+
+    metadata.insert(
+        crate::metadata_keys::MESSAGE_ID.into(),
+        serde_json::json!(&post.id),
+    );
+
+    metadata.insert("mattermost_post_id".into(), serde_json::json!(&post.id));
+    metadata.insert(
+        "mattermost_channel_id".into(),
+        serde_json::json!(&post.channel_id),
+    );
+    if let Some(tid) = team_id {
+        metadata.insert("mattermost_team_id".into(), serde_json::json!(tid));
+    }
+    if !post.root_id.is_empty() {
+        metadata.insert(
+            "mattermost_root_id".into(),
+            serde_json::json!(&post.root_id),
+        );
+    }
+
+    Some(InboundMessage {
+        id: post.id.clone(),
+        source: "mattermost".into(),
+        adapter: Some(runtime_key.to_string()),
+        conversation_id,
+        sender_id: post.user_id.clone(),
+        agent_id: None,
+        content: MessageContent::Text(post.message.clone()),
+        timestamp: chrono::DateTime::from_timestamp_millis(post.create_at)
+            .unwrap_or_else(chrono::Utc::now),
+        metadata,
+        formatted_author: None,
+    })
+}
+
+// --- API Types ---
+
+#[derive(Debug, Clone, Deserialize)]
+struct MattermostUser {
+    id: String,
+    username: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct MattermostPost {
+    id: String,
+    create_at: i64,
+    #[allow(dead_code)]
+    update_at: i64,
+    user_id: String,
+    channel_id: String,
+    root_id: String,
+    message: String,
+    /// "D" = direct message, "G" = group DM, "O" = public, "P" = private.
+    /// Not present in REST list responses; injected from WS event data.
+    #[serde(default)]
+    channel_type: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    file_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MattermostPostList {
+    #[serde(default)]
+    #[allow(dead_code)]
+    order: Vec<String>,
+    #[serde(default)]
+    posts: HashMap<String, MattermostPost>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MattermostFileUpload {
+    #[serde(default)]
+    file_infos: Vec<MattermostFileInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MattermostFileInfo {
+    id: String,
+    #[allow(dead_code)]
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MattermostWsEvent {
+    event: String,
+    #[serde(default)]
+    data: serde_json::Value,
+    #[serde(default)]
+    broadcast: MattermostWsBroadcast,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct MattermostWsBroadcast {
+    #[serde(default)]
+    #[allow(dead_code)]
+    channel_id: Option<String>,
+    #[serde(default)]
+    team_id: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    user_id: Option<String>,
+}
+
+fn split_message(text: &str, max_len: usize) -> Vec<String> {
+    if text.len() <= max_len {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        if remaining.len() <= max_len {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        let search_region = &remaining[..max_len];
+        let break_point = search_region
+            .rfind('\n')
+            .or_else(|| search_region.rfind(' '))
+            .unwrap_or(max_len);
+
+        let end = remaining.floor_char_boundary(break_point);
+        chunks.push(remaining[..end].to_string());
+        remaining = remaining[end..].trim_start_matches('\n').trim_start();
+    }
+
+    chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_split_message_short() {
+        let result = split_message("hello", 100);
+        assert_eq!(result, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_split_message_exact_boundary() {
+        let text = "a".repeat(100);
+        let result = split_message(&text, 100);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_split_message_on_newline() {
+        let text = "line1\nline2\nline3";
+        let result = split_message(text, 8);
+        assert_eq!(result, vec!["line1", "line2", "line3"]);
+    }
+
+    #[test]
+    fn test_split_message_on_space() {
+        let text = "word1 word2 word3";
+        let result = split_message(text, 12);
+        assert_eq!(result, vec!["word1 word2", "word3"]);
+    }
+
+    #[test]
+    fn test_split_message_forced_break() {
+        let text = "abcdefghijklmnopqrstuvwxyz";
+        let result = split_message(text, 10);
+        assert_eq!(result, vec!["abcdefghij", "klmnopqrst", "uvwxyz"]);
+    }
+}
