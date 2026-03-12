@@ -694,88 +694,7 @@ impl Channel {
         message: &InboundMessage,
         raw_text: &str,
     ) -> (bool, bool, bool) {
-        let text = raw_text.trim();
-        let invoked_by_command = text.starts_with('/');
-        let invoked_by_mention = match message.source.as_str() {
-            "telegram" => {
-                let text_lower = text.to_lowercase();
-                message
-                    .metadata
-                    .get("telegram_bot_username")
-                    .and_then(|v| v.as_str())
-                    .map(|username| {
-                        let mention = format!("@{}", username.to_lowercase());
-                        text_lower.match_indices(&mention).any(|(start, _)| {
-                            let end = start + mention.len();
-                            let before_ok = start == 0
-                                || text_lower[..start].chars().next_back().is_none_or(
-                                    |character| {
-                                        !(character.is_ascii_alphanumeric() || character == '_')
-                                    },
-                                );
-                            let after_ok = end == text_lower.len()
-                                || text_lower[end..].chars().next().is_none_or(|character| {
-                                    !(character.is_ascii_alphanumeric() || character == '_')
-                                });
-                            before_ok && after_ok
-                        })
-                    })
-                    .unwrap_or(false)
-            }
-            "discord" => message
-                .metadata
-                .get("discord_mentioned_bot")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            "slack" => message
-                .metadata
-                .get("slack_mentions_or_replies_to_bot")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            "twitch" => message
-                .metadata
-                .get("twitch_mentions_or_replies_to_bot")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            _ => false,
-        };
-        let invoked_by_reply = match message.source.as_str() {
-            // Use bot-specific reply metadata; generic reply_to_is_bot can
-            // match unrelated bots and cause false invokes.
-            "discord" => message
-                .metadata
-                .get("discord_reply_to_bot")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            "telegram" => {
-                let reply_to_is_bot = message
-                    .metadata
-                    .get("reply_to_is_bot")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let bot_username = message
-                    .metadata
-                    .get("telegram_bot_username")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_lowercase);
-                let reply_username = message
-                    .metadata
-                    .get("reply_to_username")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_lowercase);
-                reply_to_is_bot
-                    && reply_username
-                        .zip(bot_username)
-                        .is_some_and(|(reply, bot)| bot == reply)
-            }
-            _ => message
-                .metadata
-                .get("reply_to_is_bot")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-        };
-
-        (invoked_by_command, invoked_by_mention, invoked_by_reply)
+        compute_listen_mode_invocation(message, raw_text)
     }
 
     async fn send_builtin_text(&mut self, text: String, log_label: &str) {
@@ -1619,16 +1538,8 @@ impl Channel {
         // Deterministic liveness ping for Telegram mentions.
         // This avoids model/provider flakiness for simple "you there?" style checks.
         if message.source == "telegram" {
-            let text = raw_text.trim().to_lowercase();
             let (_, has_mention, _) = self.compute_listen_mode_invocation(&message, &raw_text);
-            let looks_like_ping = text.contains("you here")
-                || text.contains("ping")
-                || text.ends_with(" yo")
-                || text == "yo"
-                || text.contains("alive")
-                || text.contains("there?");
-
-            if has_mention && looks_like_ping {
+            if has_mention && looks_like_liveness_ping(&raw_text) {
                 self.send_builtin_text("yeah i'm here".to_string(), "telegram-ping")
                     .await;
                 return Ok(());
@@ -1637,22 +1548,10 @@ impl Channel {
 
         // Deterministic ping ack for Discord quiet-mode mentions/replies to avoid
         // flaky model behavior (e.g. skipping or over-formatting simple liveness checks).
-        if message.source == "discord" && self.listen_only_mode {
-            let text = raw_text.trim().to_lowercase();
-            let (_, invoked_by_mention, invoked_by_reply) =
-                self.compute_listen_mode_invocation(&message, &raw_text);
-            let directed = invoked_by_mention || invoked_by_reply;
-            let looks_like_ping = text.contains("you here")
-                || text.contains("ping")
-                || text.ends_with(" yo")
-                || text == "yo"
-                || text.contains("alive")
-                || text.contains("there?");
-            if directed && looks_like_ping {
-                self.send_builtin_text("yeah i'm here".to_string(), "discord-ping")
-                    .await;
-                return Ok(());
-            }
+        if should_send_discord_quiet_mode_ping_ack(&message, &raw_text, self.listen_only_mode) {
+            self.send_builtin_text("yeah i'm here".to_string(), "discord-ping")
+                .await;
+            return Ok(());
         }
 
         // Capture conversation context from the first message (platform, channel, server)
@@ -1777,17 +1676,18 @@ impl Channel {
             .await;
 
         // Safety-net: in quiet mode, explicit mention/reply should never be dropped silently.
-        if self.listen_only_mode
-            && !is_retrigger
-            && !invoked_by_command
-            && (invoked_by_mention || invoked_by_reply)
-            && skip_flag.load(std::sync::atomic::Ordering::Relaxed)
-            && !replied_flag.load(std::sync::atomic::Ordering::Relaxed)
-            && matches!(
-                message.source.as_str(),
-                "discord" | "telegram" | "slack" | "twitch" | "signal"
-            )
-        {
+        if should_send_quiet_mode_fallback(
+            &message,
+            QuietModeFallbackState {
+                listen_only_mode: self.listen_only_mode,
+                is_retrigger,
+                invoked_by_command,
+                invoked_by_mention,
+                invoked_by_reply,
+                skip_flag: skip_flag.load(std::sync::atomic::Ordering::Relaxed),
+                replied_flag: replied_flag.load(std::sync::atomic::Ordering::Relaxed),
+            },
+        ) {
             self.send_builtin_text(
                 "yeah i'm here — tell me what you need.".to_string(),
                 "quiet-mode-fallback",
@@ -3136,12 +3036,178 @@ impl Channel {
     }
 }
 
+fn compute_listen_mode_invocation(message: &InboundMessage, raw_text: &str) -> (bool, bool, bool) {
+    let text = raw_text.trim();
+    let invoked_by_command = text.starts_with('/');
+    let invoked_by_mention = match message.source.as_str() {
+        "telegram" => {
+            let text_lower = text.to_lowercase();
+            message
+                .metadata
+                .get("telegram_bot_username")
+                .and_then(|v| v.as_str())
+                .map(|username| {
+                    let mention = format!("@{}", username.to_lowercase());
+                    text_lower.match_indices(&mention).any(|(start, _)| {
+                        let end = start + mention.len();
+                        let before_ok = start == 0
+                            || text_lower[..start]
+                                .chars()
+                                .next_back()
+                                .is_none_or(|character| {
+                                    !(character.is_ascii_alphanumeric() || character == '_')
+                                });
+                        let after_ok = end == text_lower.len()
+                            || text_lower[end..].chars().next().is_none_or(|character| {
+                                !(character.is_ascii_alphanumeric() || character == '_')
+                            });
+                        before_ok && after_ok
+                    })
+                })
+                .unwrap_or(false)
+        }
+        "discord" => message
+            .metadata
+            .get("discord_mentioned_bot")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        "slack" => message
+            .metadata
+            .get("slack_mentions_or_replies_to_bot")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        "twitch" => message
+            .metadata
+            .get("twitch_mentions_or_replies_to_bot")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        _ => false,
+    };
+    let invoked_by_reply = match message.source.as_str() {
+        // Use bot-specific reply metadata; generic reply_to_is_bot can
+        // match unrelated bots and cause false invokes.
+        "discord" => message
+            .metadata
+            .get("discord_reply_to_bot")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        "telegram" => {
+            let reply_to_is_bot = message
+                .metadata
+                .get("reply_to_is_bot")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let bot_username = message
+                .metadata
+                .get("telegram_bot_username")
+                .and_then(|v| v.as_str())
+                .map(str::to_lowercase);
+            let reply_username = message
+                .metadata
+                .get("reply_to_username")
+                .and_then(|v| v.as_str())
+                .map(str::to_lowercase);
+            reply_to_is_bot
+                && reply_username
+                    .zip(bot_username)
+                    .is_some_and(|(reply, bot)| bot == reply)
+        }
+        _ => message
+            .metadata
+            .get("reply_to_is_bot")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    };
+
+    (invoked_by_command, invoked_by_mention, invoked_by_reply)
+}
+
+fn looks_like_liveness_ping(text: &str) -> bool {
+    let text = text.trim().to_lowercase();
+    text.contains("you here")
+        || text.contains("ping")
+        || text.ends_with(" yo")
+        || text == "yo"
+        || text.contains("alive")
+        || text.contains("there?")
+}
+
+fn should_send_discord_quiet_mode_ping_ack(
+    message: &InboundMessage,
+    raw_text: &str,
+    listen_only_mode: bool,
+) -> bool {
+    if message.source != "discord" || !listen_only_mode {
+        return false;
+    }
+
+    let (_, invoked_by_mention, invoked_by_reply) =
+        compute_listen_mode_invocation(message, raw_text);
+    (invoked_by_mention || invoked_by_reply) && looks_like_liveness_ping(raw_text)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct QuietModeFallbackState {
+    listen_only_mode: bool,
+    is_retrigger: bool,
+    invoked_by_command: bool,
+    invoked_by_mention: bool,
+    invoked_by_reply: bool,
+    skip_flag: bool,
+    replied_flag: bool,
+}
+
+fn should_send_quiet_mode_fallback(
+    message: &InboundMessage,
+    state: QuietModeFallbackState,
+) -> bool {
+    state.listen_only_mode
+        && !state.is_retrigger
+        && !state.invoked_by_command
+        && (state.invoked_by_mention || state.invoked_by_reply)
+        && state.skip_flag
+        && !state.replied_flag
+        && matches!(
+            message.source.as_str(),
+            "discord" | "telegram" | "slack" | "twitch" | "signal"
+        )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{recv_channel_event, should_process_event_for_channel};
+    use super::{
+        QuietModeFallbackState, compute_listen_mode_invocation, recv_channel_event,
+        should_process_event_for_channel, should_send_discord_quiet_mode_ping_ack,
+        should_send_quiet_mode_fallback,
+    };
     use crate::memory::MemoryType;
-    use crate::{AgentId, ChannelId, ProcessEvent, ProcessId};
+    use crate::{AgentId, ChannelId, InboundMessage, MessageContent, ProcessEvent, ProcessId};
+    use std::collections::HashMap;
     use std::sync::Arc;
+
+    fn inbound_message(
+        source: &str,
+        metadata: &[(&str, serde_json::Value)],
+        content: &str,
+    ) -> InboundMessage {
+        let mut message_metadata = HashMap::new();
+        for (key, value) in metadata {
+            message_metadata.insert((*key).to_string(), value.clone());
+        }
+
+        InboundMessage {
+            id: "message-1".into(),
+            source: source.into(),
+            adapter: None,
+            conversation_id: format!("{source}:conversation"),
+            sender_id: "user-1".into(),
+            agent_id: None,
+            content: MessageContent::Text(content.into()),
+            timestamp: chrono::Utc::now(),
+            metadata: message_metadata,
+            formatted_author: None,
+        }
+    }
 
     #[tokio::test]
     async fn channel_event_loop_continues_after_lagged_broadcast() {
@@ -3281,5 +3347,108 @@ mod tests {
         };
 
         assert!(!should_process_event_for_channel(&event, &channel_id));
+    }
+
+    #[test]
+    fn quiet_mode_invocation_uses_discord_mention_and_reply_metadata() {
+        let message = inbound_message(
+            "discord",
+            &[
+                ("discord_mentioned_bot", true.into()),
+                ("discord_reply_to_bot", false.into()),
+            ],
+            "@bot ping",
+        );
+
+        let (invoked_by_command, invoked_by_mention, invoked_by_reply) =
+            compute_listen_mode_invocation(&message, "@bot ping");
+
+        assert!(!invoked_by_command);
+        assert!(invoked_by_mention);
+        assert!(!invoked_by_reply);
+    }
+
+    #[test]
+    fn discord_quiet_mode_ping_ack_requires_directed_ping() {
+        let directed_message = inbound_message(
+            "discord",
+            &[("discord_reply_to_bot", true.into())],
+            "ping are you there?",
+        );
+        let ambient_message = inbound_message(
+            "discord",
+            &[("discord_reply_to_bot", false.into())],
+            "ping are you there?",
+        );
+
+        assert!(should_send_discord_quiet_mode_ping_ack(
+            &directed_message,
+            "ping are you there?",
+            true
+        ));
+        assert!(!should_send_discord_quiet_mode_ping_ack(
+            &ambient_message,
+            "ping are you there?",
+            true
+        ));
+        assert!(!should_send_discord_quiet_mode_ping_ack(
+            &directed_message,
+            "ping are you there?",
+            false
+        ));
+    }
+
+    #[test]
+    fn quiet_mode_fallback_requires_directed_skipped_turn_without_reply() {
+        let message = inbound_message("discord", &[], "hey");
+
+        assert!(should_send_quiet_mode_fallback(
+            &message,
+            QuietModeFallbackState {
+                listen_only_mode: true,
+                is_retrigger: false,
+                invoked_by_command: false,
+                invoked_by_mention: true,
+                invoked_by_reply: false,
+                skip_flag: true,
+                replied_flag: false,
+            }
+        ));
+        assert!(!should_send_quiet_mode_fallback(
+            &message,
+            QuietModeFallbackState {
+                listen_only_mode: true,
+                is_retrigger: false,
+                invoked_by_command: false,
+                invoked_by_mention: true,
+                invoked_by_reply: false,
+                skip_flag: false,
+                replied_flag: false,
+            }
+        ));
+        assert!(!should_send_quiet_mode_fallback(
+            &message,
+            QuietModeFallbackState {
+                listen_only_mode: true,
+                is_retrigger: false,
+                invoked_by_command: false,
+                invoked_by_mention: true,
+                invoked_by_reply: false,
+                skip_flag: true,
+                replied_flag: true,
+            }
+        ));
+        assert!(!should_send_quiet_mode_fallback(
+            &message,
+            QuietModeFallbackState {
+                listen_only_mode: true,
+                is_retrigger: true,
+                invoked_by_command: false,
+                invoked_by_mention: true,
+                invoked_by_reply: false,
+                skip_flag: true,
+                replied_flag: false,
+            }
+        ));
     }
 }
