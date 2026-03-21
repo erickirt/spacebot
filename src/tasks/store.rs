@@ -488,19 +488,25 @@ fn merge_json_object(current: Value, patch: Option<Value>) -> Value {
         return current;
     };
 
-    match (current, patch) {
-        (Value::Object(mut current_object), Value::Object(patch_object)) => {
-            for (key, patch_value) in patch_object {
-                let merged_value = match current_object.remove(&key) {
-                    Some(current_value) => merge_json_value(current_value, patch_value),
-                    None => patch_value,
-                };
-                current_object.insert(key, merged_value);
-            }
-            Value::Object(current_object)
-        }
-        (_, patch_value) => patch_value,
+    // Only apply object patches — ignore scalars/nulls to preserve the
+    // invariant that task metadata is always an object.
+    let Value::Object(patch_object) = patch else {
+        return current;
+    };
+
+    let Value::Object(mut current_object) = current else {
+        return Value::Object(patch_object);
+    };
+
+    for (key, patch_value) in patch_object {
+        let merged_value = match current_object.remove(&key) {
+            Some(current_value) => merge_json_value(current_value, patch_value),
+            None => patch_value,
+        };
+        current_object.insert(key, merged_value);
     }
+
+    Value::Object(current_object)
 }
 
 fn merge_json_value(current: Value, patch: Value) -> Value {

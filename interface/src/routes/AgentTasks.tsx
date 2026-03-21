@@ -69,6 +69,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function toSafeExternalUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol === "https:" || parsed.protocol === "http:") {
+      return parsed.toString();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function readGithubReference(
   value: unknown,
   kind: GithubReference["kind"],
@@ -79,7 +92,7 @@ function readGithubReference(
 
   const number = typeof value.number === "number" ? value.number : null;
   const repo = typeof value.repo === "string" ? value.repo : null;
-  const url = typeof value.url === "string" ? value.url : null;
+  const url = toSafeExternalUrl(value.url);
 
   if (number === null && url === null && repo === null) {
     return null;
@@ -102,12 +115,14 @@ function getGithubReferences(metadata: Record<string, unknown>): GithubReference
 
 function GithubMetadataBadges({
   metadata,
+  references: precomputed,
   compact = false,
 }: {
-  metadata: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  references?: GithubReference[];
   compact?: boolean;
 }) {
-  const references = getGithubReferences(metadata);
+  const references = precomputed ?? (metadata ? getGithubReferences(metadata) : []);
   if (references.length === 0) {
     return null;
   }
@@ -681,14 +696,18 @@ function TaskDetailDialog({
             </div>
           )}
 
-          {getGithubReferences(task.metadata).length > 0 && (
-            <div>
-              <label className="mb-1 block text-xs text-ink-dull">
-                GitHub Links
-              </label>
-              <GithubMetadataBadges metadata={task.metadata} />
-            </div>
-          )}
+          {(() => {
+            const githubRefs = getGithubReferences(task.metadata);
+            if (githubRefs.length === 0) return null;
+            return (
+              <div>
+                <label className="mb-1 block text-xs text-ink-dull">
+                  GitHub Links
+                </label>
+                <GithubMetadataBadges references={githubRefs} />
+              </div>
+            );
+          })()}
 
           {/* Metadata */}
           <div className="grid grid-cols-1 gap-2 text-xs text-ink-dull sm:grid-cols-2">

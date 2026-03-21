@@ -206,7 +206,7 @@ Arguments:
   status: String (optional)
   priority: String (optional)
   subtasks: JSON (optional, full replacement of subtasks array)
-  metadata: JSON (optional, merged with existing)
+  metadata: JSON (optional, deep-merged with existing; nested objects are merged recursively)
   complete_subtask: i32 (optional, index of subtask to mark complete)
 ```
 
@@ -268,6 +268,11 @@ Recommended metadata shape for GitHub linkage:
     "repo": "spacedriveapp/spacebot",
     "number": 123,
     "url": "https://github.com/spacedriveapp/spacebot/issues/123"
+  },
+  "github_pr": {
+    "repo": "spacedriveapp/spacebot",
+    "number": 456,
+    "url": "https://github.com/spacedriveapp/spacebot/pull/456"
   }
 }
 ```
