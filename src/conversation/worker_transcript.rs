@@ -462,6 +462,11 @@ fn convert_history(history: &[rig::message::Message]) -> Vec<TranscriptStep> {
                     }
                 }
             }
+            rig::message::Message::System { content } => {
+                steps.push(TranscriptStep::UserText {
+                    text: content.clone(),
+                });
+            }
         }
     }
 
