@@ -319,7 +319,7 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 								<HugeiconsIcon icon={Settings02Icon} className="h-3.5 w-3.5" />
 							</Button>
 						</PopoverTrigger>
-						<PopoverContent align="end" sideOffset={4} className="w-80 p-3">
+						<PopoverContent align="end" sideOffset={4} className="w-96 p-3">
 							{defaultsLoading ? (
 								<div className="py-4 text-center text-xs text-ink-faint">Loading...</div>
 							) : defaults ? (

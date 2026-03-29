@@ -20,23 +20,78 @@ interface ConversationSettingsPanelProps {
 	saving?: boolean;
 }
 
-const PRESETS: Array<{ id: string; name: string; description: string; settings: ConversationSettings }> = [
-	{ id: "chat", name: "Chat", description: "Full memory, delegates work", settings: { memory: "full", delegation: "standard", worker_context: { history: "none", memory: "none" } } },
-	{ id: "focus", name: "Focus", description: "Read-only memory, no persistence", settings: { memory: "ambient", delegation: "standard", worker_context: { history: "none", memory: "none" } } },
-	{ id: "hands-on", name: "Hands-on", description: "Direct tools, workers get context", settings: { memory: "off", delegation: "direct", worker_context: { history: "recent", memory: "tools" } } },
-	{ id: "quick", name: "Quick", description: "Stateless, lightweight", settings: { memory: "off", delegation: "standard", worker_context: { history: "none", memory: "none" } } },
+const PRESETS: Array<{
+	id: string;
+	name: string;
+	description: string;
+	settings: ConversationSettings;
+}> = [
+	{
+		id: "chat",
+		name: "Chat",
+		description: "Full memory, delegates heavy work to workers",
+		settings: {
+			memory: "full",
+			delegation: "standard",
+			worker_context: { history: "none", memory: "none" },
+		},
+	},
+	{
+		id: "focus",
+		name: "Focus",
+		description: "Agent can see memories but won't create new ones",
+		settings: {
+			memory: "ambient",
+			delegation: "standard",
+			worker_context: { history: "none", memory: "none" },
+		},
+	},
+	{
+		id: "hands-on",
+		name: "Hands-on",
+		description: "Agent has direct tool access, workers get conversation context",
+		settings: {
+			memory: "off",
+			delegation: "direct",
+			worker_context: { history: "recent", memory: "tools" },
+		},
+	},
+	{
+		id: "quick",
+		name: "Quick",
+		description: "No memory, no frills — fast stateless responses",
+		settings: {
+			memory: "off",
+			delegation: "standard",
+			worker_context: { history: "none", memory: "none" },
+		},
+	},
 ];
 
 const MEMORY_OPTIONS = [
-	{ value: "full", label: "On", description: "Reads and writes memories" },
-	{ value: "ambient", label: "Context Only", description: "Reads but won't write" },
-	{ value: "off", label: "Off", description: "No memory context" },
+	{ value: "full", label: "On" },
+	{ value: "ambient", label: "Context Only" },
+	{ value: "off", label: "Off" },
 ] as const;
 
+const MEMORY_DESCRIPTIONS: Record<string, string> = {
+	full: "Agent reads and writes memories. Conversations are remembered long-term.",
+	ambient:
+		"Agent can see its memories but won't save new ones. Good for sensitive or throwaway chats.",
+	off: "No memory at all. The agent only knows its base personality.",
+};
+
 const DELEGATION_OPTIONS = [
-	{ value: "standard", label: "Standard", description: "Delegates via workers" },
-	{ value: "direct", label: "Direct", description: "Has all tools directly" },
+	{ value: "standard", label: "Standard" },
+	{ value: "direct", label: "Direct" },
 ] as const;
+
+const DELEGATION_DESCRIPTIONS: Record<string, string> = {
+	standard:
+		"Agent delegates tasks to background workers. Stays responsive while work happens in parallel.",
+	direct:
+		"Agent has direct access to shell, files, browser, and memory tools. Power-user mode.",
+};
 
 const WORKER_HISTORY_OPTIONS = [
 	{ value: "none", label: "None" },
@@ -53,7 +108,9 @@ const WORKER_MEMORY_OPTIONS = [
 ] as const;
 
 /** Group models by provider for the select dropdown. */
-function groupModelsByProvider(models: ConversationDefaultsResponse["available_models"]) {
+function groupModelsByProvider(
+	models: ConversationDefaultsResponse["available_models"],
+) {
 	const groups: Record<string, typeof models> = {};
 	for (const model of models) {
 		const key = model.provider;
@@ -63,7 +120,35 @@ function groupModelsByProvider(models: ConversationDefaultsResponse["available_m
 	return groups;
 }
 
-function SettingRow({ label, children }: { label: string; children: React.ReactNode }) {
+function SettingField({
+	label,
+	description,
+	children,
+}: {
+	label: string;
+	description?: string;
+	children: React.ReactNode;
+}) {
+	return (
+		<div className="flex flex-col gap-1">
+			<div className="flex items-center justify-between gap-3">
+				<label className="shrink-0 text-xs text-ink-dull">{label}</label>
+				<div className="w-40">{children}</div>
+			</div>
+			{description && (
+				<p className="text-[11px] leading-snug text-ink-faint">{description}</p>
+			)}
+		</div>
+	);
+}
+
+function SettingRow({
+	label,
+	children,
+}: {
+	label: string;
+	children: React.ReactNode;
+}) {
 	return (
 		<div className="flex items-center justify-between gap-3">
 			<label className="shrink-0 text-xs text-ink-dull">{label}</label>
@@ -83,6 +168,9 @@ export function ConversationSettingsPanel({
 	const [showAdvanced, setShowAdvanced] = useState(false);
 	const modelGroups = groupModelsByProvider(defaults.available_models);
 
+	const currentMemory = currentSettings.memory || defaults.memory;
+	const currentDelegation = currentSettings.delegation || defaults.delegation;
+
 	return (
 		<div className="flex flex-col gap-3">
 			{/* Presets */}
@@ -90,7 +178,9 @@ export function ConversationSettingsPanel({
 				{PRESETS.map((preset) => (
 					<button
 						key={preset.id}
-						onClick={() => onChange({ ...currentSettings, ...preset.settings })}
+						onClick={() =>
+							onChange({ ...currentSettings, ...preset.settings })
+						}
 						title={preset.description}
 						className="rounded-md border border-app-line bg-app-darkBox px-2.5 py-1 text-xs text-ink-dull transition-colors hover:border-accent/40 hover:text-ink"
 					>
@@ -100,65 +190,98 @@ export function ConversationSettingsPanel({
 			</div>
 
 			{/* Core settings */}
-			<div className="flex flex-col gap-2.5">
-				<SettingRow label="Model">
+			<div className="flex flex-col gap-3">
+				<SettingField label="Model" description="Which LLM powers this conversation. Inherited by workers and branches unless overridden below.">
 					<Select
 						value={currentSettings.model || defaults.model}
-						onValueChange={(value) => onChange({ ...currentSettings, model: value })}
+						onValueChange={(value) =>
+							onChange({ ...currentSettings, model: value })
+						}
 					>
 						<SelectTrigger className="h-7 text-xs">
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>
-							{Object.entries(modelGroups).map(([provider, models]) => (
-								<SelectGroup key={provider}>
-									<SelectLabel>{provider}</SelectLabel>
-									{models.map((m) => (
-										<SelectItem key={m.id} value={m.id} className="text-xs">
-											{m.name}
-										</SelectItem>
-									))}
-								</SelectGroup>
-							))}
+							{Object.entries(modelGroups).map(
+								([provider, models]) => (
+									<SelectGroup key={provider}>
+										<SelectLabel>{provider}</SelectLabel>
+										{models.map((m) => (
+											<SelectItem
+												key={m.id}
+												value={m.id}
+												className="text-xs"
+											>
+												{m.name}
+											</SelectItem>
+										))}
+									</SelectGroup>
+								),
+							)}
 						</SelectContent>
 					</Select>
-				</SettingRow>
+				</SettingField>
 
-				<SettingRow label="Memory">
+				<SettingField
+					label="Memory"
+					description={MEMORY_DESCRIPTIONS[currentMemory]}
+				>
 					<Select
-						value={currentSettings.memory || defaults.memory}
-						onValueChange={(value) => onChange({ ...currentSettings, memory: value as ConversationSettings["memory"] })}
+						value={currentMemory}
+						onValueChange={(value) =>
+							onChange({
+								...currentSettings,
+								memory: value as ConversationSettings["memory"],
+							})
+						}
 					>
 						<SelectTrigger className="h-7 text-xs">
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>
 							{MEMORY_OPTIONS.map((opt) => (
-								<SelectItem key={opt.value} value={opt.value} className="text-xs">
+								<SelectItem
+									key={opt.value}
+									value={opt.value}
+									className="text-xs"
+								>
 									{opt.label}
 								</SelectItem>
 							))}
 						</SelectContent>
 					</Select>
-				</SettingRow>
+				</SettingField>
 
-				<SettingRow label="Mode">
+				<SettingField
+					label="Mode"
+					description={DELEGATION_DESCRIPTIONS[currentDelegation]}
+				>
 					<Select
-						value={currentSettings.delegation || defaults.delegation}
-						onValueChange={(value) => onChange({ ...currentSettings, delegation: value as ConversationSettings["delegation"] })}
+						value={currentDelegation}
+						onValueChange={(value) =>
+							onChange({
+								...currentSettings,
+								delegation:
+									value as ConversationSettings["delegation"],
+							})
+						}
 					>
 						<SelectTrigger className="h-7 text-xs">
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>
 							{DELEGATION_OPTIONS.map((opt) => (
-								<SelectItem key={opt.value} value={opt.value} className="text-xs">
+								<SelectItem
+									key={opt.value}
+									value={opt.value}
+									className="text-xs"
+								>
 									{opt.label}
 								</SelectItem>
 							))}
 						</SelectContent>
 					</Select>
-				</SettingRow>
+				</SettingField>
 			</div>
 
 			{/* Advanced toggle */}
@@ -170,60 +293,110 @@ export function ConversationSettingsPanel({
 			</button>
 
 			{showAdvanced && (
-				<div className="flex flex-col gap-2.5 border-t border-app-line pt-2.5">
+				<div className="flex flex-col gap-3 border-t border-app-line pt-2.5">
 					{/* Per-process model overrides */}
-					<p className="text-[11px] font-medium text-ink-faint">Model overrides</p>
-					{(["channel", "branch", "worker"] as const).map((process) => (
-						<SettingRow key={process} label={process.charAt(0).toUpperCase() + process.slice(1)}>
-							<Select
-								value={currentSettings.model_overrides?.[process] || "__inherit__"}
-								onValueChange={(value) => {
-									const overrides = { ...currentSettings.model_overrides };
-									if (value === "__inherit__") {
-										delete overrides[process];
-									} else {
-										overrides[process] = value;
-									}
-									onChange({ ...currentSettings, model_overrides: overrides });
-								}}
+					<SettingField
+						label="Model overrides"
+						description="Use a different model for a specific process. 'Inherit' uses the model set above."
+					>
+						<div />
+					</SettingField>
+					{(["channel", "branch", "worker"] as const).map(
+						(process) => (
+							<SettingRow
+								key={process}
+								label={
+									process.charAt(0).toUpperCase() +
+									process.slice(1)
+								}
 							>
-								<SelectTrigger className="h-7 text-xs">
-									<SelectValue />
-								</SelectTrigger>
-								<SelectContent>
-									<SelectItem value="__inherit__" className="text-xs italic">
-										Inherit
-									</SelectItem>
-									{Object.entries(modelGroups).map(([provider, models]) => (
-										<SelectGroup key={provider}>
-											<SelectLabel>{provider}</SelectLabel>
-											{models.map((m) => (
-												<SelectItem key={m.id} value={m.id} className="text-xs">
-													{m.name}
-												</SelectItem>
-											))}
-										</SelectGroup>
-									))}
-								</SelectContent>
-							</Select>
-						</SettingRow>
-					))}
+								<Select
+									value={
+										currentSettings.model_overrides?.[
+											process
+										] || "__inherit__"
+									}
+									onValueChange={(value) => {
+										const overrides = {
+											...currentSettings.model_overrides,
+										};
+										if (value === "__inherit__") {
+											delete overrides[process];
+										} else {
+											overrides[process] = value;
+										}
+										onChange({
+											...currentSettings,
+											model_overrides: overrides,
+										});
+									}}
+								>
+									<SelectTrigger className="h-7 text-xs">
+										<SelectValue />
+									</SelectTrigger>
+									<SelectContent>
+										<SelectItem
+											value="__inherit__"
+											className="text-xs italic"
+										>
+											Inherit
+										</SelectItem>
+										{Object.entries(modelGroups).map(
+											([provider, models]) => (
+												<SelectGroup key={provider}>
+													<SelectLabel>
+														{provider}
+													</SelectLabel>
+													{models.map((m) => (
+														<SelectItem
+															key={m.id}
+															value={m.id}
+															className="text-xs"
+														>
+															{m.name}
+														</SelectItem>
+													))}
+												</SelectGroup>
+											),
+										)}
+									</SelectContent>
+								</Select>
+							</SettingRow>
+						),
+					)}
 
-					<p className="mt-1 text-[11px] font-medium text-ink-faint">Worker context</p>
+					<SettingField
+						label="Worker context"
+						description="What information spawned workers receive. More context = smarter workers but slower startup."
+					>
+						<div />
+					</SettingField>
 					<SettingRow label="History">
 						<Select
-							value={currentSettings.worker_context?.history || defaults.worker_context.history}
-							onValueChange={(value) => onChange({
-								...currentSettings,
-								worker_context: { ...currentSettings.worker_context, history: value as any },
-							})}
+							value={
+								currentSettings.worker_context?.history ||
+								defaults.worker_context.history
+							}
+							onValueChange={(value) =>
+								onChange({
+									...currentSettings,
+									worker_context: {
+										...currentSettings.worker_context,
+										history: value as any,
+									},
+								})
+							}
 						>
 							<SelectTrigger className="h-7 text-xs">
 								<SelectValue />
 							</SelectTrigger>
 							<SelectContent>
 								{WORKER_HISTORY_OPTIONS.map((opt) => (
-									<SelectItem key={opt.value} value={opt.value} className="text-xs">
+									<SelectItem
+										key={opt.value}
+										value={opt.value}
+										className="text-xs"
+									>
 										{opt.label}
 									</SelectItem>
 								))}
@@ -233,18 +406,30 @@ export function ConversationSettingsPanel({
 
 					<SettingRow label="Memory">
 						<Select
-							value={currentSettings.worker_context?.memory || defaults.worker_context.memory}
-							onValueChange={(value) => onChange({
-								...currentSettings,
-								worker_context: { ...currentSettings.worker_context, memory: value as any },
-							})}
+							value={
+								currentSettings.worker_context?.memory ||
+								defaults.worker_context.memory
+							}
+							onValueChange={(value) =>
+								onChange({
+									...currentSettings,
+									worker_context: {
+										...currentSettings.worker_context,
+										memory: value as any,
+									},
+								})
+							}
 						>
 							<SelectTrigger className="h-7 text-xs">
 								<SelectValue />
 							</SelectTrigger>
 							<SelectContent>
 								{WORKER_MEMORY_OPTIONS.map((opt) => (
-									<SelectItem key={opt.value} value={opt.value} className="text-xs">
+									<SelectItem
+										key={opt.value}
+										value={opt.value}
+										className="text-xs"
+									>
 										{opt.label}
 									</SelectItem>
 								))}
@@ -257,11 +442,21 @@ export function ConversationSettingsPanel({
 			{/* Actions */}
 			<div className="flex items-center justify-end gap-2 pt-1">
 				{onCancel && (
-					<Button variant="ghost" size="sm" onClick={onCancel} className="h-7 text-xs">
+					<Button
+						variant="ghost"
+						size="sm"
+						onClick={onCancel}
+						className="h-7 text-xs"
+					>
 						Cancel
 					</Button>
 				)}
-				<Button size="sm" onClick={onSave} disabled={saving} className="h-7 text-xs">
+				<Button
+					size="sm"
+					onClick={onSave}
+					disabled={saving}
+					className="h-7 text-xs"
+				>
 					{saving ? "Saving..." : "Apply"}
 				</Button>
 			</div>
