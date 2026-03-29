@@ -1027,6 +1027,14 @@ pub(super) async fn get_channel_settings(
     let pools = state.agent_pools.load();
     let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
 
+    // Validate channel exists
+    let channel_store = ChannelStore::new(pool.clone());
+    channel_store
+        .get(&channel_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
     let store = crate::conversation::ChannelSettingsStore::new(pool.clone());
     let settings = store
         .get(&query.agent_id, &channel_id)
@@ -1063,6 +1071,14 @@ pub(super) async fn update_channel_settings(
 ) -> Result<Json<ChannelSettingsResponse>, StatusCode> {
     let pools = state.agent_pools.load();
     let pool = pools.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+
+    // Validate channel exists
+    let channel_store = ChannelStore::new(pool.clone());
+    channel_store
+        .get(&channel_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     let store = crate::conversation::ChannelSettingsStore::new(pool.clone());
     store

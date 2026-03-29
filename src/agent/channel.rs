@@ -879,8 +879,14 @@ impl Channel {
         match text {
             "/status" => {
                 let routing = self.deps.runtime_config.routing.load();
-                let channel_model = routing.resolve(ProcessType::Channel, None).to_string();
-                let branch_model = routing.resolve(ProcessType::Branch, None).to_string();
+                let channel_model = self
+                    .resolved_settings
+                    .resolve_model("channel")
+                    .unwrap_or_else(|| routing.resolve(ProcessType::Channel, None));
+                let branch_model = self
+                    .resolved_settings
+                    .resolve_model("branch")
+                    .unwrap_or_else(|| routing.resolve(ProcessType::Branch, None));
                 let mode = match self.resolved_settings.response_mode {
                     ResponseMode::Active => "active",
                     ResponseMode::Quiet => "quiet (only command/@mention/reply)",
@@ -1554,50 +1560,57 @@ impl Channel {
 
         let project_context = self.build_project_context(&prompt_engine).await;
 
-        // Render working memory layers (Layers 2 + 3).
-        let wm_config = **rc.working_memory.load();
-        let timezone = self.deps.working_memory.timezone();
-        let working_memory = match crate::memory::working::render_working_memory(
-            &self.deps.working_memory,
-            self.id.as_ref(),
-            &wm_config,
-            timezone,
-        )
-        .await
-        {
-            Ok(text) => {
-                if text.is_empty() {
-                    tracing::debug!(channel_id = %self.id, "working memory rendered empty (disabled?)");
-                } else {
-                    tracing::debug!(channel_id = %self.id, len = text.len(), "working memory rendered");
+        // Only inject memory context if not in Off mode (same guard as build_system_prompt).
+        let (working_memory, memory_bulletin_text) = if matches!(
+            self.resolved_settings.memory,
+            MemoryMode::Off
+        ) {
+            (String::new(), None)
+        } else {
+            let wm_config = **rc.working_memory.load();
+            let timezone = self.deps.working_memory.timezone();
+            let wm = match crate::memory::working::render_working_memory(
+                &self.deps.working_memory,
+                self.id.as_ref(),
+                &wm_config,
+                timezone,
+            )
+            .await
+            {
+                Ok(text) => text,
+                Err(error) => {
+                    tracing::warn!(channel_id = %self.id, %error, "working memory render failed");
+                    String::new()
                 }
-                text
-            }
-            Err(error) => {
-                tracing::warn!(channel_id = %self.id, %error, "working memory render failed");
-                String::new()
-            }
+            };
+            (wm, Some(memory_bulletin.to_string()))
         };
 
-        let channel_activity_map = match crate::memory::working::render_channel_activity_map(
-            &self.deps.sqlite_pool,
-            &self.deps.working_memory,
-            self.id.as_ref(),
-            &wm_config,
-            timezone,
-        )
-        .await
-        {
-            Ok(text) => text,
-            Err(error) => {
-                tracing::warn!(channel_id = %self.id, %error, "channel activity map render failed");
-                String::new()
+        let channel_activity_map = if matches!(self.resolved_settings.memory, MemoryMode::Off) {
+            String::new()
+        } else {
+            let wm_config = **rc.working_memory.load();
+            let timezone = self.deps.working_memory.timezone();
+            match crate::memory::working::render_channel_activity_map(
+                &self.deps.sqlite_pool,
+                &self.deps.working_memory,
+                self.id.as_ref(),
+                &wm_config,
+                timezone,
+            )
+            .await
+            {
+                Ok(text) => text,
+                Err(error) => {
+                    tracing::warn!(channel_id = %self.id, %error, "channel activity map render failed");
+                    String::new()
+                }
             }
         };
 
         prompt_engine.render_channel_prompt_with_links(
             empty_to_none(identity_context),
-            empty_to_none(memory_bulletin.to_string()),
+            memory_bulletin_text,
             empty_to_none(skills_prompt),
             worker_capabilities,
             self.conversation_context.clone(),

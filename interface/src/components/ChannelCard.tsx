@@ -197,7 +197,7 @@ export function ChannelCard({
 							</button>
 						</PopoverTrigger>
 						<PopoverContent align="end" sideOffset={4} collisionPadding={16} className="max-h-[80vh] w-96 overflow-y-auto p-3" onClick={(e) => e.preventDefault()}>
-							{defaults ? (
+							{defaults && channelSettingsData ? (
 								<ConversationSettingsPanel
 									defaults={defaults}
 									currentSettings={settings}

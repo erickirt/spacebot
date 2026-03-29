@@ -121,18 +121,28 @@ fn parse_response_mode(
     use crate::conversation::settings::ResponseMode;
 
     if let Some(mode) = response_mode {
-        return Some(match mode {
-            "quiet" => ResponseMode::Quiet,
-            "mention_only" => ResponseMode::MentionOnly,
-            _ => ResponseMode::Active,
-        });
+        return match mode {
+            "active" => Some(ResponseMode::Active),
+            "quiet" => Some(ResponseMode::Quiet),
+            "mention_only" => Some(ResponseMode::MentionOnly),
+            unknown => {
+                tracing::warn!(
+                    response_mode = unknown,
+                    "unknown response_mode value, ignoring"
+                );
+                None
+            }
+        };
     }
-    // Backwards compat: listen_only_mode = true maps to Quiet
-    if let Some(true) = listen_only_mode {
-        tracing::warn!("listen_only_mode is deprecated, use response_mode = \"quiet\" instead");
-        return Some(ResponseMode::Quiet);
+    // Backwards compat: listen_only_mode maps to response_mode
+    match listen_only_mode {
+        Some(true) => {
+            tracing::warn!("listen_only_mode is deprecated, use response_mode = \"quiet\" instead");
+            Some(ResponseMode::Quiet)
+        }
+        Some(false) => Some(ResponseMode::Active),
+        None => None,
     }
-    None
 }
 
 fn parse_close_policy(value: Option<&str>) -> Option<ClosePolicy> {
@@ -2334,25 +2344,37 @@ impl Config {
             .map(|b| {
                 let settings = b.settings.map(|s| {
                     use crate::conversation::settings::*;
-                    ConversationSettings {
+                    let mut cs = ConversationSettings {
                         model: s.model,
-                        memory: match s.memory.as_deref() {
-                            Some("ambient") => MemoryMode::Ambient,
-                            Some("off") => MemoryMode::Off,
-                            _ => MemoryMode::Full,
-                        },
-                        delegation: match s.delegation.as_deref() {
-                            Some("direct") => DelegationMode::Direct,
-                            _ => DelegationMode::Standard,
-                        },
-                        response_mode: match s.response_mode.as_deref() {
-                            Some("quiet") => ResponseMode::Quiet,
-                            Some("mention_only") => ResponseMode::MentionOnly,
-                            _ => ResponseMode::Active,
-                        },
                         save_attachments: s.save_attachments,
                         ..Default::default()
+                    };
+                    // Only override enum fields when explicitly set in TOML,
+                    // so omitted fields inherit from agent/system defaults.
+                    if let Some(m) = s.memory.as_deref() {
+                        cs.memory = match m {
+                            "ambient" => MemoryMode::Ambient,
+                            "off" => MemoryMode::Off,
+                            "full" => MemoryMode::Full,
+                            _ => MemoryMode::Full,
+                        };
                     }
+                    if let Some(d) = s.delegation.as_deref() {
+                        cs.delegation = match d {
+                            "direct" => DelegationMode::Direct,
+                            "standard" => DelegationMode::Standard,
+                            _ => DelegationMode::Standard,
+                        };
+                    }
+                    if let Some(r) = s.response_mode.as_deref() {
+                        cs.response_mode = match r {
+                            "quiet" => ResponseMode::Quiet,
+                            "mention_only" => ResponseMode::MentionOnly,
+                            "active" => ResponseMode::Active,
+                            _ => ResponseMode::Active,
+                        };
+                    }
+                    cs
                 });
                 Binding {
                     agent_id: b.agent_id,

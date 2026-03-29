@@ -193,6 +193,12 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 	const [showSettings, setShowSettings] = useState(false);
 	const [settings, setSettings] = useState<ConversationSettings>({});
 
+	// Reset settings when switching conversations
+	useEffect(() => {
+		setSettings({});
+		setShowSettings(false);
+	}, [activeConversationId, agentId]);
+
 	// Fetch conversations list
 	const { data: conversationsData, isLoading: conversationsLoading } = useQuery({
 		queryKey: ["portal-conversations", agentId],

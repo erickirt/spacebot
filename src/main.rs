@@ -1920,20 +1920,35 @@ async fn run(
                         .as_ref()
                         .clone();
 
-                    // Load per-conversation settings for portal conversations (idle worker resume).
+                    // Load per-conversation settings (idle worker resume).
+                    // Try portal store first, then channel_settings for platform channels.
                     let resolved_settings = {
-                        let store = spacebot::conversation::PortalConversationStore::new(
+                        let agent_id_str = agent_id.to_string();
+                        let portal_store = spacebot::conversation::PortalConversationStore::new(
                             agent.deps.sqlite_pool.clone(),
                         );
-                        match store.get(&agent_id.to_string(), &conversation_id).await {
-                            Ok(Some(conv)) => {
-                                spacebot::conversation::settings::ResolvedConversationSettings::resolve(
-                                    conv.settings.as_ref(),
-                                    None,
-                                    None,
-                                )
-                            }
-                            _ => spacebot::conversation::settings::ResolvedConversationSettings::default(),
+                        let channel_store = spacebot::conversation::ChannelSettingsStore::new(
+                            agent.deps.sqlite_pool.clone(),
+                        );
+                        if let Ok(Some(conv)) =
+                            portal_store.get(&agent_id_str, &conversation_id).await
+                        {
+                            spacebot::conversation::settings::ResolvedConversationSettings::resolve(
+                                conv.settings.as_ref(),
+                                None,
+                                None,
+                            )
+                        } else if let Ok(Some(settings)) =
+                            channel_store.get(&agent_id_str, &conversation_id).await
+                        {
+                            spacebot::conversation::settings::ResolvedConversationSettings::resolve(
+                                Some(&settings),
+                                None,
+                                None,
+                            )
+                        } else {
+                            spacebot::conversation::settings::ResolvedConversationSettings::default(
+                            )
                         }
                     };
 
