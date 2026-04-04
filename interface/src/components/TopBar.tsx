@@ -1,5 +1,6 @@
 import { createContext, useContext, useRef, useCallback, useSyncExternalStore, type ReactNode, type MouseEvent } from "react";
 import { Link } from "@tanstack/react-router";
+import { SelectPill } from "@spacedrive/primitives";
 import { BASE_PATH } from "@/api/client";
 import { IS_TAURI, startDragging } from "@/platform";
 
@@ -88,7 +89,7 @@ export function TopBar() {
 
 	return (
 		<div
-			className={`flex h-12 w-full shrink-0 border-b border-app-line bg-app-darkBox/50${IS_TAURI ? " select-none" : ""}`}
+			className={`flex h-12 w-full shrink-0 bg-app-darkBox/50${IS_TAURI ? " select-none" : ""}`}
 			onMouseDown={handleMouseDown}
 		>
 			{/* Left corner block */}
@@ -97,17 +98,11 @@ export function TopBar() {
 				<div className="w-[72px] shrink-0" />
 			) : (
 				/* Web: ball icon block matching sidebar width + border */
-				<Link
-					to="/"
-					className="flex w-14 shrink-0 items-center justify-center border-r border-sidebar-line bg-sidebar"
-				>
-					<img
-						src={`${BASE_PATH}/ball.png`}
-						alt=""
-						className="h-6 w-6 transition-transform duration-150 ease-out hover:scale-110 active:scale-95"
-						draggable={false}
-					/>
-				</Link>
+				<div className="flex w-[220px] shrink-0 items-center border-r border-app-line bg-sidebar px-3">
+					<SelectPill variant="sidebar" size="md" className="w-full">
+						<span className="font-semibold">Spacedrive Inc.</span>
+					</SelectPill>
+				</div>
 			)}
 
 			{/* Route-controlled content area */}

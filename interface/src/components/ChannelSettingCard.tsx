@@ -20,8 +20,8 @@ import {
 	DialogHeader,
 	DialogTitle,
 	DialogFooter,
-} from "@spaceui/primitives";
-import { Toggle } from "@/ui/Toggle";
+} from "@spacedrive/primitives";
+import { Switch } from "@spacedrive/primitives";
 import {PlatformIcon} from "@/lib/platformIcons";
 import {isValidE164, E164_ERROR_TEXT, validateSignalDmAllowedUsers} from "@/lib/format";
 import {TagInput} from "@/components/TagInput";
@@ -379,7 +379,7 @@ export function InstanceCard({instance, expanded, onToggleExpand}: InstanceCardP
 										{instance.enabled ? "Receiving messages" : "Adapter paused"}
 									</p>
 								</div>
-								<Toggle
+								<Switch
 									checked={instance.enabled}
 									onCheckedChange={(checked) => toggleEnabled.mutate(checked)}
 									disabled={toggleEnabled.isPending}

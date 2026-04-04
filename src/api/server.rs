@@ -142,6 +142,7 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
             projects::delete_project
         ))
         .routes(routes!(projects::scan_project))
+        .routes(routes!(projects::serve_logo))
         .routes(routes!(projects::disk_usage))
         .routes(routes!(projects::create_repo))
         .routes(routes!(projects::delete_repo))

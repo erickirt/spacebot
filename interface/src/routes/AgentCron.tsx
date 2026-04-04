@@ -19,8 +19,8 @@ import {
 	SelectValue,
 	SelectContent,
 	SelectItem,
-} from "@spaceui/primitives";
-import { Toggle } from "@/ui/Toggle";
+} from "@spacedrive/primitives";
+import { Switch } from "@spacedrive/primitives";
 
 // -- Helpers --
 
@@ -506,12 +506,12 @@ export function AgentCron({ agentId }: AgentCronProps) {
 
 							<div className="flex items-center justify-between">
 								<Label>Enabled</Label>
-								<Toggle checked={formData.enabled} onCheckedChange={(checked) => setFormData((d) => ({ ...d, enabled: checked }))} size="lg" />
+								<Switch checked={formData.enabled} onCheckedChange={(checked) => setFormData((d) => ({ ...d, enabled: checked }))} size="lg" />
 							</div>
 
 							<div className="flex items-center justify-between">
 								<Label>Run Once</Label>
-								<Toggle checked={formData.run_once} onCheckedChange={(checked) => setFormData((d) => ({ ...d, run_once: checked }))} size="lg" />
+								<Switch checked={formData.run_once} onCheckedChange={(checked) => setFormData((d) => ({ ...d, run_once: checked }))} size="lg" />
 							</div>
 						</div>
 					</div>

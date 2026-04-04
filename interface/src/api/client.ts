@@ -13,7 +13,7 @@ export function getServerUrl(): string {
 	return _serverUrl;
 }
 
-function getApiBase(): string {
+export function getApiBase(): string {
 	if (_serverUrl) return `${_serverUrl}/api`;
 	return BASE_PATH + "/api";
 }
@@ -1153,12 +1153,12 @@ export type ProjectStatus = "active" | "archived";
 
 export interface Project {
 	id: string;
-	agent_id: string;
 	name: string;
 	description: string;
 	icon: string;
 	tags: string[];
 	root_path: string;
+	logo_path: string | null;
 	settings: Record<string, unknown>;
 	status: ProjectStatus;
 	created_at: string;
@@ -2232,92 +2232,93 @@ export const api = {
 	},
 
 	// Projects API
-	listProjects: (agentId: string, status?: ProjectStatus) => {
-		const search = new URLSearchParams({ agent_id: agentId });
+	listProjects: (status?: ProjectStatus) => {
+		const search = new URLSearchParams();
 		if (status) search.set("status", status);
-		return fetchJson<ProjectListResponse>(`/agents/projects?${search}`);
+		const qs = search.toString();
+		return fetchJson<ProjectListResponse>(`/agents/projects${qs ? `?${qs}` : ""}`);
 	},
 
-	getProject: (agentId: string, projectId: string) =>
+	getProject: (projectId: string) =>
 		fetchJson<ProjectWithRelations>(
-			`/agents/projects/${encodeURIComponent(projectId)}?agent_id=${encodeURIComponent(agentId)}`,
+			`/agents/projects/${encodeURIComponent(projectId)}`,
 		),
 
-	createProject: async (agentId: string, request: CreateProjectRequest): Promise<ProjectWithRelations> => {
+	createProject: async (request: CreateProjectRequest): Promise<ProjectWithRelations> => {
 		const response = await fetch(`${getApiBase()}/agents/projects`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ ...request, agent_id: agentId }),
+			body: JSON.stringify(request),
 		});
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<ProjectWithRelations>;
 	},
 
-	updateProject: async (agentId: string, projectId: string, request: UpdateProjectRequest): Promise<ProjectWithRelations> => {
+	updateProject: async (projectId: string, request: UpdateProjectRequest): Promise<ProjectWithRelations> => {
 		const response = await fetch(`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}`, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ ...request, agent_id: agentId }),
+			body: JSON.stringify(request),
 		});
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<ProjectWithRelations>;
 	},
 
-	deleteProject: async (agentId: string, projectId: string): Promise<ProjectActionResponse> => {
+	deleteProject: async (projectId: string): Promise<ProjectActionResponse> => {
 		const response = await fetch(
-			`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}?agent_id=${encodeURIComponent(agentId)}`,
+			`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}`,
 			{ method: "DELETE" },
 		);
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<ProjectActionResponse>;
 	},
 
-	scanProject: async (agentId: string, projectId: string): Promise<ProjectWithRelations> => {
+	scanProject: async (projectId: string): Promise<ProjectWithRelations> => {
 		const response = await fetch(
-			`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}/scan?agent_id=${encodeURIComponent(agentId)}`,
+			`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}/scan`,
 			{ method: "POST" },
 		);
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<ProjectWithRelations>;
 	},
 
-	projectDiskUsage: (agentId: string, projectId: string) =>
+	projectDiskUsage: (projectId: string) =>
 		fetchJson<DiskUsageResponse>(
-			`/agents/projects/${encodeURIComponent(projectId)}/disk-usage?agent_id=${encodeURIComponent(agentId)}`,
+			`/agents/projects/${encodeURIComponent(projectId)}/disk-usage`,
 		),
 
-	createProjectRepo: async (agentId: string, projectId: string, request: CreateRepoRequest): Promise<{ repo: ProjectRepo }> => {
+	createProjectRepo: async (projectId: string, request: CreateRepoRequest): Promise<{ repo: ProjectRepo }> => {
 		const response = await fetch(`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}/repos`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ ...request, agent_id: agentId }),
+			body: JSON.stringify(request),
 		});
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<{ repo: ProjectRepo }>;
 	},
 
-	deleteProjectRepo: async (agentId: string, projectId: string, repoId: string): Promise<ProjectActionResponse> => {
+	deleteProjectRepo: async (projectId: string, repoId: string): Promise<ProjectActionResponse> => {
 		const response = await fetch(
-			`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}/repos/${encodeURIComponent(repoId)}?agent_id=${encodeURIComponent(agentId)}`,
+			`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}/repos/${encodeURIComponent(repoId)}`,
 			{ method: "DELETE" },
 		);
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<ProjectActionResponse>;
 	},
 
-	createProjectWorktree: async (agentId: string, projectId: string, request: CreateWorktreeRequest): Promise<{ worktree: ProjectWorktree }> => {
+	createProjectWorktree: async (projectId: string, request: CreateWorktreeRequest): Promise<{ worktree: ProjectWorktree }> => {
 		const response = await fetch(`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}/worktrees`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ ...request, agent_id: agentId }),
+			body: JSON.stringify(request),
 		});
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<{ worktree: ProjectWorktree }>;
 	},
 
-	deleteProjectWorktree: async (agentId: string, projectId: string, worktreeId: string): Promise<ProjectActionResponse> => {
+	deleteProjectWorktree: async (projectId: string, worktreeId: string): Promise<ProjectActionResponse> => {
 		const response = await fetch(
-			`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}/worktrees/${encodeURIComponent(worktreeId)}?agent_id=${encodeURIComponent(agentId)}`,
+			`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}/worktrees/${encodeURIComponent(worktreeId)}`,
 			{ method: "DELETE" },
 		);
 		if (!response.ok) throw new Error(`API error: ${response.status}`);

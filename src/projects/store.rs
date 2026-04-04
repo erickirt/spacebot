@@ -6,6 +6,7 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{Row as _, SqlitePool};
+use std::path::Path;
 
 // Enums
 
@@ -63,12 +64,12 @@ pub struct ProjectSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Project {
     pub id: String,
-    pub agent_id: String,
     pub name: String,
     pub description: String,
     pub icon: String,
     pub tags: Vec<String>,
     pub root_path: String,
+    pub logo_path: Option<String>,
     pub settings: Value,
     pub status: ProjectStatus,
     pub created_at: String,
@@ -134,7 +135,6 @@ pub struct ProjectWorktreeWithRepo {
 
 #[derive(Debug, Clone)]
 pub struct CreateProjectInput {
-    pub agent_id: String,
     pub name: String,
     pub description: String,
     pub icon: String,
@@ -149,6 +149,7 @@ pub struct UpdateProjectInput {
     pub description: Option<String>,
     pub icon: Option<String>,
     pub tags: Option<Vec<String>>,
+    pub logo_path: Option<String>,
     pub settings: Option<Value>,
     pub status: Option<ProjectStatus>,
 }
@@ -196,12 +197,11 @@ impl ProjectStore {
 
         sqlx::query(
             r#"
-            INSERT INTO projects (id, agent_id, name, description, icon, tags, root_path, settings, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
+            INSERT INTO projects (id, name, description, icon, tags, root_path, settings, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
             "#,
         )
         .bind(&id)
-        .bind(&input.agent_id)
         .bind(&input.name)
         .bind(&input.description)
         .bind(&input.icon)
@@ -213,15 +213,14 @@ impl ProjectStore {
         .context("failed to insert project")?;
 
         Ok(self
-            .get_project(&input.agent_id, &id)
+            .get_project(&id)
             .await?
             .context("project not found after insert")?)
     }
 
-    pub async fn get_project(&self, agent_id: &str, project_id: &str) -> Result<Option<Project>> {
-        let row = sqlx::query("SELECT * FROM projects WHERE id = ? AND agent_id = ?")
+    pub async fn get_project(&self, project_id: &str) -> Result<Option<Project>> {
+        let row = sqlx::query("SELECT * FROM projects WHERE id = ?")
             .bind(project_id)
-            .bind(agent_id)
             .fetch_optional(&self.pool)
             .await
             .context("failed to fetch project")?;
@@ -231,21 +230,18 @@ impl ProjectStore {
 
     pub async fn list_projects(
         &self,
-        agent_id: &str,
         status: Option<ProjectStatus>,
     ) -> Result<Vec<Project>> {
         let rows = if let Some(status) = status {
             sqlx::query(
-                "SELECT * FROM projects WHERE agent_id = ? AND status = ? ORDER BY updated_at DESC",
+                "SELECT * FROM projects WHERE status = ? ORDER BY updated_at DESC",
             )
-            .bind(agent_id)
             .bind(status.as_str())
             .fetch_all(&self.pool)
             .await
             .context("failed to list projects")?
         } else {
-            sqlx::query("SELECT * FROM projects WHERE agent_id = ? ORDER BY updated_at DESC")
-                .bind(agent_id)
+            sqlx::query("SELECT * FROM projects ORDER BY updated_at DESC")
                 .fetch_all(&self.pool)
                 .await
                 .context("failed to list projects")?
@@ -256,11 +252,10 @@ impl ProjectStore {
 
     pub async fn update_project(
         &self,
-        agent_id: &str,
         project_id: &str,
         input: UpdateProjectInput,
     ) -> Result<Option<Project>> {
-        let existing = self.get_project(agent_id, project_id).await?;
+        let existing = self.get_project(project_id).await?;
         let Some(existing) = existing else {
             return Ok(None);
         };
@@ -270,6 +265,7 @@ impl ProjectStore {
         let icon = input.icon.unwrap_or(existing.icon);
         let tags = input.tags.unwrap_or(existing.tags);
         let tags_json = serde_json::to_string(&tags).context("failed to serialize tags")?;
+        let logo_path = input.logo_path.or(existing.logo_path);
         let settings = input.settings.unwrap_or(existing.settings);
         let settings_json =
             serde_json::to_string(&settings).context("failed to serialize settings")?;
@@ -278,30 +274,29 @@ impl ProjectStore {
         sqlx::query(
             r#"
             UPDATE projects
-            SET name = ?, description = ?, icon = ?, tags = ?, settings = ?,
-                status = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND agent_id = ?
+            SET name = ?, description = ?, icon = ?, tags = ?, logo_path = ?,
+                settings = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
             "#,
         )
         .bind(&name)
         .bind(&description)
         .bind(&icon)
         .bind(&tags_json)
+        .bind(&logo_path)
         .bind(&settings_json)
         .bind(status.as_str())
         .bind(project_id)
-        .bind(agent_id)
         .execute(&self.pool)
         .await
         .context("failed to update project")?;
 
-        self.get_project(agent_id, project_id).await
+        self.get_project(project_id).await
     }
 
-    pub async fn delete_project(&self, agent_id: &str, project_id: &str) -> Result<bool> {
-        let result = sqlx::query("DELETE FROM projects WHERE id = ? AND agent_id = ?")
+    pub async fn delete_project(&self, project_id: &str) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM projects WHERE id = ?")
             .bind(project_id)
-            .bind(agent_id)
             .execute(&self.pool)
             .await
             .context("failed to delete project")?;
@@ -312,10 +307,9 @@ impl ProjectStore {
     /// Load a project with all its repos and worktrees.
     pub async fn get_project_with_relations(
         &self,
-        agent_id: &str,
         project_id: &str,
     ) -> Result<Option<ProjectWithRelations>> {
-        let Some(project) = self.get_project(agent_id, project_id).await? else {
+        let Some(project) = self.get_project(project_id).await? else {
             return Ok(None);
         };
         let repos = self.list_repos(project_id).await?;
@@ -548,6 +542,19 @@ impl ProjectStore {
         Ok(())
     }
 
+    /// Set the detected logo path for a project.
+    pub async fn set_logo_path(&self, project_id: &str, logo_path: Option<&str>) -> Result<()> {
+        sqlx::query(
+            "UPDATE projects SET logo_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        )
+        .bind(logo_path)
+        .bind(project_id)
+        .execute(&self.pool)
+        .await
+        .context("failed to update project logo_path")?;
+        Ok(())
+    }
+
     /// List worktrees belonging to a specific repo.
     pub async fn list_worktrees_for_repo(&self, repo_id: &str) -> Result<Vec<ProjectWorktree>> {
         let rows =
@@ -576,12 +583,12 @@ fn row_to_project(row: &sqlx::sqlite::SqliteRow) -> Result<Project> {
 
     Ok(Project {
         id: row.try_get("id").context("missing id")?,
-        agent_id: row.try_get("agent_id").context("missing agent_id")?,
         name: row.try_get("name").context("missing name")?,
         description: row.try_get("description").context("missing description")?,
         icon: row.try_get("icon").context("missing icon")?,
         tags,
         root_path: row.try_get("root_path").context("missing root_path")?,
+        logo_path: row.try_get("logo_path").unwrap_or(None),
         settings,
         status,
         created_at: row.try_get("created_at").context("missing created_at")?,
@@ -622,6 +629,100 @@ fn row_to_worktree(row: &sqlx::sqlite::SqliteRow) -> Result<ProjectWorktree> {
     })
 }
 
+// Logo detection
+
+/// Detect a project logo by checking well-known paths in priority order.
+/// Returns the relative path (relative to project root) of the first match.
+pub fn detect_logo(root: &Path) -> Option<String> {
+    // Priority 1: .github directory logos
+    let github_candidates = [
+        ".github/logo.png",
+        ".github/logo.svg",
+        ".github/Ball.png",
+        ".github/icon.png",
+    ];
+    for candidate in &github_candidates {
+        if root.join(candidate).exists() {
+            return Some(candidate.to_string());
+        }
+    }
+
+    // Priority 2: root-level logos
+    let root_candidates = ["logo.png", "logo.svg", "icon.png", "icon.svg"];
+    for candidate in &root_candidates {
+        if root.join(candidate).exists() {
+            return Some(candidate.to_string());
+        }
+    }
+
+    // Priority 3: public directory favicons and logos (shallow check)
+    let public_dirs = ["public", "apps/web/public", "packages/ui/public"];
+    let public_patterns = [
+        "favicon.png",
+        "favicon.ico",
+        "apple-touch-icon.png",
+    ];
+    for dir in &public_dirs {
+        let public_path = root.join(dir);
+        if !public_path.is_dir() {
+            continue;
+        }
+        for pattern in &public_patterns {
+            let candidate = format!("{dir}/{pattern}");
+            if root.join(&candidate).exists() {
+                return Some(candidate);
+            }
+        }
+        // Check for *-logo.png and *-logo.svg in public dirs
+        if let Ok(entries) = std::fs::read_dir(&public_path) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if (name.ends_with("-logo.png") || name.ends_with("-logo.svg")) && entry.path().is_file() {
+                    return Some(format!("{dir}/{name}"));
+                }
+            }
+        }
+    }
+
+    // Priority 4: Tauri icons
+    let tauri_candidates = [
+        "apps/tauri/src-tauri/icons/icon.png",
+        "src-tauri/icons/icon.png",
+    ];
+    for candidate in &tauri_candidates {
+        if root.join(candidate).exists() {
+            return Some(candidate.to_string());
+        }
+    }
+    // Also check **/src-tauri/icons/icon.png one level deep in apps/
+    let apps_dir = root.join("apps");
+    if apps_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&apps_dir) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    let candidate_path = entry.path().join("src-tauri/icons/icon.png");
+                    if candidate_path.exists() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        return Some(format!("apps/{name}/src-tauri/icons/icon.png"));
+                    }
+                }
+            }
+        }
+    }
+
+    // Priority 5: Mobile icons
+    if root.join("apps/mobile/icon.png").exists() {
+        return Some("apps/mobile/icon.png".to_string());
+    }
+
+    // Priority 6: Docs favicon
+    if root.join("docs/public/favicon.png").exists() {
+        return Some("docs/public/favicon.png".to_string());
+    }
+
+    None
+}
+
 // Tests
 
 #[cfg(test)]
@@ -646,7 +747,7 @@ mod tests {
 
         let project = store
             .create_project(CreateProjectInput {
-                agent_id: "agent-1".into(),
+
                 name: "Spacebot".into(),
                 description: "The Spacebot monorepo".into(),
                 icon: "".into(),
@@ -662,7 +763,7 @@ mod tests {
         assert_eq!(project.status, ProjectStatus::Active);
 
         let projects = store
-            .list_projects("agent-1", None)
+            .list_projects(None)
             .await
             .expect("failed to list projects");
         assert_eq!(projects.len(), 1);
@@ -676,7 +777,7 @@ mod tests {
 
         let project = store
             .create_project(CreateProjectInput {
-                agent_id: "agent-1".into(),
+
                 name: "Test".into(),
                 description: String::new(),
                 icon: String::new(),
@@ -732,7 +833,7 @@ mod tests {
 
         let project = store
             .create_project(CreateProjectInput {
-                agent_id: "agent-1".into(),
+
                 name: "Test".into(),
                 description: String::new(),
                 icon: String::new(),
@@ -745,7 +846,6 @@ mod tests {
 
         let updated = store
             .update_project(
-                "agent-1",
                 &project.id,
                 UpdateProjectInput {
                     status: Some(ProjectStatus::Archived),
@@ -760,7 +860,7 @@ mod tests {
 
         // Filtering by active should return empty.
         let active = store
-            .list_projects("agent-1", Some(ProjectStatus::Active))
+            .list_projects(Some(ProjectStatus::Active))
             .await
             .expect("failed to list");
         assert!(active.is_empty());
@@ -773,7 +873,7 @@ mod tests {
 
         let project = store
             .create_project(CreateProjectInput {
-                agent_id: "agent-1".into(),
+
                 name: "Test".into(),
                 description: String::new(),
                 icon: String::new(),
@@ -810,7 +910,7 @@ mod tests {
             .expect("failed to create worktree");
 
         let deleted = store
-            .delete_project("agent-1", &project.id)
+            .delete_project(&project.id)
             .await
             .expect("failed to delete project");
         assert!(deleted);
@@ -836,7 +936,7 @@ mod tests {
 
         store
             .create_project(CreateProjectInput {
-                agent_id: "agent-1".into(),
+
                 name: "First".into(),
                 description: String::new(),
                 icon: String::new(),
@@ -849,7 +949,7 @@ mod tests {
 
         let result = store
             .create_project(CreateProjectInput {
-                agent_id: "agent-1".into(),
+
                 name: "Second".into(),
                 description: String::new(),
                 icon: String::new(),

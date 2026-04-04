@@ -8,7 +8,7 @@ import {
 	type CreateProjectRequest,
 	type CreateWorktreeRequest,
 } from "@/api/client";
-import { Badge, Button, DialogRoot, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription, Input, Label, TextArea } from "@spaceui/primitives";
+import { Badge, Button, DialogRoot, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription, Input, Label, TextArea } from "@spacedrive/primitives";
 import { formatTimeAgo } from "@/lib/format";
 import { clsx } from "clsx";
 import { AnimatePresence, motion } from "framer-motion";
@@ -105,11 +105,9 @@ function ProjectCard({
 function CreateProjectDialog({
 	open,
 	onOpenChange,
-	agentId,
 }: {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
-	agentId: string;
 }) {
 	const queryClient = useQueryClient();
 	const [name, setName] = useState("");
@@ -120,9 +118,9 @@ function CreateProjectDialog({
 
 	const createMutation = useMutation({
 		mutationFn: (request: CreateProjectRequest) =>
-			api.createProject(agentId, request),
+			api.createProject(request),
 		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: ["projects", agentId] });
+			queryClient.invalidateQueries({ queryKey: ["projects"] });
 			onOpenChange(false);
 			setName("");
 			setRootPath("");
@@ -235,13 +233,11 @@ function CreateProjectDialog({
 function CreateWorktreeDialog({
 	open,
 	onOpenChange,
-	agentId,
 	projectId,
 	repos,
 }: {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
-	agentId: string;
 	projectId: string;
 	repos: ProjectRepo[];
 }) {
@@ -261,10 +257,10 @@ function CreateWorktreeDialog({
 
 	const createMutation = useMutation({
 		mutationFn: (request: CreateWorktreeRequest) =>
-			api.createProjectWorktree(agentId, projectId, request),
+			api.createProjectWorktree(projectId, request),
 		onSuccess: () => {
 			queryClient.invalidateQueries({
-				queryKey: ["project", agentId, projectId],
+				queryKey: ["project", projectId],
 			});
 			onOpenChange(false);
 			setBranch("");
@@ -546,55 +542,53 @@ function WorktreeCard({
 // ---------------------------------------------------------------------------
 
 function ProjectDetail({
-	agentId,
 	projectId,
 	onBack,
 }: {
-	agentId: string;
 	projectId: string;
 	onBack: () => void;
 }) {
 	const queryClient = useQueryClient();
 
 	const { data: project, isLoading } = useQuery({
-		queryKey: ["project", agentId, projectId],
-		queryFn: () => api.getProject(agentId, projectId),
+		queryKey: ["project", projectId],
+		queryFn: () => api.getProject(projectId),
 		refetchInterval: 10_000,
 	});
 
 	const scanMutation = useMutation({
-		mutationFn: () => api.scanProject(agentId, projectId),
+		mutationFn: () => api.scanProject(projectId),
 		onSuccess: () => {
 			queryClient.invalidateQueries({
-				queryKey: ["project", agentId, projectId],
+				queryKey: ["project", projectId],
 			});
 		},
 	});
 
 	const deleteProjectMutation = useMutation({
-		mutationFn: () => api.deleteProject(agentId, projectId),
+		mutationFn: () => api.deleteProject(projectId),
 		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: ["projects", agentId] });
+			queryClient.invalidateQueries({ queryKey: ["projects"] });
 			onBack();
 		},
 	});
 
 	const deleteRepoMutation = useMutation({
 		mutationFn: (repoId: string) =>
-			api.deleteProjectRepo(agentId, projectId, repoId),
+			api.deleteProjectRepo(projectId, repoId),
 		onSuccess: () => {
 			queryClient.invalidateQueries({
-				queryKey: ["project", agentId, projectId],
+				queryKey: ["project", projectId],
 			});
 		},
 	});
 
 	const deleteWorktreeMutation = useMutation({
 		mutationFn: (worktreeId: string) =>
-			api.deleteProjectWorktree(agentId, projectId, worktreeId),
+			api.deleteProjectWorktree(projectId, worktreeId),
 		onSuccess: () => {
 			queryClient.invalidateQueries({
-				queryKey: ["project", agentId, projectId],
+				queryKey: ["project", projectId],
 			});
 		},
 	});
@@ -812,7 +806,6 @@ function ProjectDetail({
 				<CreateWorktreeDialog
 					open={showCreateWorktree}
 					onOpenChange={setShowCreateWorktree}
-					agentId={agentId}
 					projectId={projectId}
 					repos={
 						worktreeRepoPreselect
@@ -875,15 +868,15 @@ function ProjectDetail({
 // Main Page
 // ---------------------------------------------------------------------------
 
-export function AgentProjects({ agentId }: { agentId: string }) {
+export function AgentProjects() {
 	const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
 		null,
 	);
 	const [showCreate, setShowCreate] = useState(false);
 
 	const { data, isLoading } = useQuery({
-		queryKey: ["projects", agentId],
-		queryFn: () => api.listProjects(agentId),
+		queryKey: ["projects"],
+		queryFn: () => api.listProjects(),
 		refetchInterval: 15_000,
 	});
 
@@ -892,7 +885,6 @@ export function AgentProjects({ agentId }: { agentId: string }) {
 	if (selectedProjectId) {
 		return (
 			<ProjectDetail
-				agentId={agentId}
 				projectId={selectedProjectId}
 				onBack={() => setSelectedProjectId(null)}
 			/>
@@ -908,7 +900,7 @@ export function AgentProjects({ agentId }: { agentId: string }) {
 							Projects
 						</h2>
 						<p className="mt-0.5 text-xs text-ink-faint">
-							Workspaces, repos, and worktrees this agent knows about.
+							Workspaces, repos, and worktrees across all agents.
 						</p>
 					</div>
 					<Button size="sm" onClick={() => setShowCreate(true)}>
@@ -952,7 +944,6 @@ export function AgentProjects({ agentId }: { agentId: string }) {
 			<CreateProjectDialog
 				open={showCreate}
 				onOpenChange={setShowCreate}
-				agentId={agentId}
 			/>
 		</div>
 	);

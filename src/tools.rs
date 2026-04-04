@@ -411,7 +411,6 @@ pub async fn add_channel_tools(
     handle
         .add_tool(ProjectManageTool::new(
             state.deps.project_store.clone(),
-            state.deps.agent_id.to_string(),
         ))
         .await?;
     // Add attachment recall tool when save_attachments is enabled

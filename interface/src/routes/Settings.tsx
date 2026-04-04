@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type GlobalSettingsResponse, type UpdateStatus, type SecretCategory, type SecretListItem, type StoreState } from "@/api/client";
-import { Badge, Button, Input, DialogRoot, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, SelectRoot, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@spaceui/primitives";
+import { Badge, Button, Input, DialogRoot, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, SelectRoot, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@spacedrive/primitives";
 import { SettingSidebarButton } from "@/ui/SettingSidebarButton";
-import { Toggle } from "@/ui/Toggle";
+import { Switch } from "@spacedrive/primitives";
 import { useSearch, useNavigate } from "@tanstack/react-router";
 import { PlatformCatalog, InstanceCard, AddInstanceCard } from "@/components/ChannelSettingCard";
 import { ModelSelect } from "@/components/ModelSelect";
@@ -982,7 +982,7 @@ export function Settings() {
 							disabled={!editingProvider || !modelInput.trim() || (editingProvider === "azure" && (!azureBaseUrl.trim() || !azureApiVersion.trim() || !azureDeployment.trim()))}
 							loading={testModelMutation.isPending}
 							variant="outline"
-							size="sm"
+							size="md"
 						>
 							Test model
 						</Button>
@@ -1021,33 +1021,33 @@ export function Settings() {
 										onClick={() => removeMutation.mutate(editingProvider, { onSuccess: (result) => { if (result.success) handleClose(); } })}
 										loading={removeMutation.isPending}
 										variant="destructive"
-										size="sm"
+										size="md"
 									>
 										Remove
 									</Button>
 								)}
-								<Button onClick={handleClose} variant="ghost" size="sm">
+								<Button onClick={handleClose} variant="outline" size="md">
 									Cancel
 								</Button>
 							<Button
 								onClick={handleSave}
 								disabled={!keyInput.trim() || !azureBaseUrl.trim() || !azureApiVersion.trim() || !azureDeployment.trim()}
 								loading={updateMutation.isPending}
-								size="sm"
+								size="md"
 							>
 								Save
 							</Button>
 							</>
 						) : (
 							<>
-								<Button onClick={handleClose} variant="ghost" size="sm">
+								<Button onClick={handleClose} variant="outline" size="md">
 									Cancel
 								</Button>
 								<Button
 									onClick={handleSave}
 									disabled={!modelInput.trim()}
 									loading={updateMutation.isPending}
-									size="sm"
+									size="md"
 								>
 									Save
 								</Button>
@@ -1498,7 +1498,7 @@ function SecretsSection() {
 							onClick={() => unlockMutation.mutate(unlockKeyInput.trim())}
 							disabled={!unlockKeyInput.trim()}
 							loading={unlockMutation.isPending}
-							size="sm"
+							size="md"
 						>
 							Unlock
 						</Button>
@@ -1542,7 +1542,7 @@ function SecretsSection() {
 				</div>
 				<div className="flex-1" />
 				{canMutate && (
-					<Button onClick={handleOpenAdd} size="sm">
+					<Button onClick={handleOpenAdd} size="md">
 						Add secret
 					</Button>
 				)}
@@ -1566,10 +1566,10 @@ function SecretsSection() {
 					</p>
 					{secrets.length === 0 && canMutate && (
 						<div className="mt-4 flex gap-2">
-							<Button onClick={handleOpenAdd} size="sm">
+							<Button onClick={handleOpenAdd} size="md">
 								Add secret
 							</Button>
-							<Button onClick={() => migrateMutation.mutate()} variant="outline" size="sm" loading={migrateMutation.isPending}>
+							<Button onClick={() => migrateMutation.mutate()} variant="outline" size="md" loading={migrateMutation.isPending}>
 								Migrate from config
 							</Button>
 						</div>
@@ -1587,7 +1587,7 @@ function SecretsSection() {
 									<code className="text-sm font-medium text-ink">{secret.name}</code>
 									<Badge
 										variant="outline"
-										size="sm"
+										size="md"
 										className="pointer-events-none transition-none"
 									>
 										{secret.category}
@@ -1599,10 +1599,10 @@ function SecretsSection() {
 							</div>
 							{canMutate && (
 								<div className="flex gap-1.5 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto">
-									<Button onClick={() => handleOpenEdit(secret)} variant="outline" size="sm">
+									<Button onClick={() => handleOpenEdit(secret)} variant="outline" size="md">
 										Update
 									</Button>
-									<Button onClick={() => setDeleteTarget(secret.name)} variant="outline" size="sm">
+									<Button onClick={() => setDeleteTarget(secret.name)} variant="outline" size="md">
 										Delete
 									</Button>
 								</div>
@@ -1615,14 +1615,14 @@ function SecretsSection() {
 			{/* Bottom actions for encrypted stores */}
 			{storeStatus?.encrypted && !storeStatus.platform_managed && canMutate && (
 				<div className="mt-6 flex items-center gap-2 border-t border-app-line pt-4">
-					<Button onClick={() => lockMutation.mutate()} variant="outline" size="sm" loading={lockMutation.isPending}>
+					<Button onClick={() => lockMutation.mutate()} variant="outline" size="md" loading={lockMutation.isPending}>
 						Lock store
 					</Button>
-					<Button onClick={() => setRotateDialogOpen(true)} variant="outline" size="sm">
+					<Button onClick={() => setRotateDialogOpen(true)} variant="outline" size="md">
 						Rotate master key
 					</Button>
 					<div className="flex-1" />
-					<Button onClick={() => migrateMutation.mutate()} variant="outline" size="sm" loading={migrateMutation.isPending}>
+					<Button onClick={() => migrateMutation.mutate()} variant="outline" size="md" loading={migrateMutation.isPending}>
 						Migrate from config
 					</Button>
 				</div>
@@ -1631,7 +1631,7 @@ function SecretsSection() {
 			{/* Migrate button for unencrypted stores */}
 			{state === "unencrypted" && secrets.length > 0 && (
 				<div className="mt-4 flex justify-end">
-					<Button onClick={() => migrateMutation.mutate()} variant="outline" size="sm" loading={migrateMutation.isPending}>
+					<Button onClick={() => migrateMutation.mutate()} variant="outline" size="md" loading={migrateMutation.isPending}>
 						Migrate from config
 					</Button>
 				</div>
@@ -1715,8 +1715,8 @@ function SecretsSection() {
 					<DialogFooter>
 						<Button
 							onClick={() => { setAddDialogOpen(false); setEditingSecret(null); }}
-							variant="ghost"
-							size="sm"
+							variant="outline"
+							size="md"
 						>
 							Cancel
 						</Button>
@@ -1724,7 +1724,7 @@ function SecretsSection() {
 							onClick={handleSave}
 							disabled={(!editingSecret && !nameInput.trim()) || !valueInput}
 							loading={putMutation.isPending}
-							size="sm"
+							size="md"
 						>
 							Save
 						</Button>
@@ -1743,14 +1743,14 @@ function SecretsSection() {
 						</DialogDescription>
 					</DialogHeader>
 					<DialogFooter>
-						<Button onClick={() => setDeleteTarget(null)} variant="ghost" size="sm">
+						<Button onClick={() => setDeleteTarget(null)} variant="outline" size="md">
 							Cancel
 						</Button>
 						<Button
 							onClick={() => { if (deleteTarget) deleteMutation.mutate(deleteTarget); }}
 							loading={deleteMutation.isPending}
 							variant="destructive"
-							size="sm"
+							size="md"
 						>
 							Delete
 						</Button>
@@ -1783,15 +1783,15 @@ function SecretsSection() {
 							<DialogFooter>
 								<Button
 									onClick={() => setEncryptDialogOpen(false)}
-									variant="ghost"
-									size="sm"
+									variant="outline"
+									size="md"
 								>
 									Cancel
 								</Button>
 								<Button
 									onClick={() => encryptMutation.mutate()}
 									loading={encryptMutation.isPending}
-									size="sm"
+									size="md"
 								>
 									Enable encryption
 								</Button>
@@ -1811,7 +1811,7 @@ function SecretsSection() {
 									<code className="flex-1 rounded border border-app-line bg-app-darkerBox px-3 py-2 font-mono text-tiny text-ink break-all select-all">
 										{masterKeyDisplay}
 									</code>
-									<Button onClick={handleCopyKey} size="sm" variant={masterKeyCopied ? "secondary" : "outline"}>
+									<Button onClick={handleCopyKey} size="md" variant={masterKeyCopied ? "secondary" : "outline"}>
 										{masterKeyCopied ? "Copied" : "Copy"}
 									</Button>
 								</div>
@@ -1827,7 +1827,7 @@ function SecretsSection() {
 										setMasterKeyDisplay(null);
 										setMasterKeyCopied(false);
 									}}
-									size="sm"
+									size="md"
 								>
 									Done
 								</Button>
@@ -1848,13 +1848,13 @@ function SecretsSection() {
 						</DialogDescription>
 					</DialogHeader>
 					<DialogFooter>
-						<Button onClick={() => setRotateDialogOpen(false)} variant="ghost" size="sm">
+						<Button onClick={() => setRotateDialogOpen(false)} variant="outline" size="md">
 							Cancel
 						</Button>
 						<Button
 							onClick={() => rotateMutation.mutate()}
 							loading={rotateMutation.isPending}
-							size="sm"
+							size="md"
 						>
 							Rotate key
 						</Button>
@@ -1939,7 +1939,7 @@ function ApiKeysSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 										setMessage(null);
 									}}
 									variant="outline"
-									size="sm"
+									size="md"
 								>
 									{settings?.brave_search_key ? "Update" : "Add key"}
 								</Button>
@@ -1947,7 +1947,7 @@ function ApiKeysSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 									<Button
 										onClick={handleRemoveBraveKey}
 										variant="outline"
-										size="sm"
+										size="md"
 										loading={updateMutation.isPending}
 									>
 										Remove
@@ -1989,14 +1989,14 @@ function ApiKeysSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 						}}
 					/>
 					<DialogFooter>
-						<Button onClick={() => setEditingBraveKey(false)} variant="ghost" size="sm">
+						<Button onClick={() => setEditingBraveKey(false)} variant="outline" size="md">
 							Cancel
 						</Button>
 						<Button
 							onClick={handleSaveBraveKey}
 							disabled={!braveKeyInput.trim()}
 							loading={updateMutation.isPending}
-							size="sm"
+							size="md"
 						>
 							Save
 						</Button>
@@ -2076,8 +2076,8 @@ function ServerSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 									Disable to prevent the HTTP API from starting
 								</p>
 							</div>
-							<Toggle
-								size="sm"
+							<Switch
+								size="md"
 								checked={apiEnabled}
 								onCheckedChange={setApiEnabled}
 							/>
@@ -2618,7 +2618,7 @@ function UpdatesSection() {
 									checkNowMutation.mutate();
 								}}
 								loading={checkNowMutation.isPending || isFetching}
-								size="sm"
+								size="md"
 								variant="outline"
 							>
 								Check now
@@ -2679,7 +2679,7 @@ function UpdatesSection() {
 									}}
 									disabled={!data?.can_apply || !data?.update_available}
 									loading={applyMutation.isPending}
-									size="sm"
+									size="md"
 								>
 									Update now
 								</Button>
@@ -2711,8 +2711,8 @@ function UpdatesSection() {
 										<p className="text-xs font-medium uppercase tracking-wider text-ink-faint">Docker Compose</p>
 										<Button
 											onClick={() => handleCopy("compose", dockerComposeCommands.join("\n"))}
-											variant="ghost"
-											size="sm"
+											variant="outline"
+											size="md"
 										>
 											{copiedBlock === "compose" ? "Copied" : "Copy"}
 										</Button>
@@ -2724,8 +2724,8 @@ function UpdatesSection() {
 										<p className="text-xs font-medium uppercase tracking-wider text-ink-faint">docker run</p>
 										<Button
 											onClick={() => handleCopy("docker-run", dockerRunCommands.join("\n"))}
-											variant="ghost"
-											size="sm"
+											variant="outline"
+											size="md"
 										>
 											{copiedBlock === "docker-run" ? "Copied" : "Copy"}
 										</Button>
@@ -2741,8 +2741,8 @@ function UpdatesSection() {
 									<p className="text-xs font-medium uppercase tracking-wider text-ink-faint">Source Install</p>
 									<Button
 										onClick={() => handleCopy("native", nativeCommands.join("\n"))}
-										variant="ghost"
-										size="sm"
+										variant="outline"
+										size="md"
 									>
 										{copiedBlock === "native" ? "Copied" : "Copy"}
 									</Button>
@@ -3023,7 +3023,7 @@ function ConfigFileSection() {
 				</p>
 				<div className="flex items-center gap-2 flex-shrink-0 ml-4">
 					{isDirty && (
-						<Button onClick={handleRevert} variant="ghost" size="sm">
+						<Button onClick={handleRevert} variant="outline" size="md">
 							Revert
 						</Button>
 					)}
@@ -3031,7 +3031,7 @@ function ConfigFileSection() {
 						onClick={handleSave}
 						disabled={!isDirty || !!validationError}
 						loading={updateMutation.isPending}
-						size="sm"
+						size="md"
 					>
 						Save
 					</Button>
@@ -3112,11 +3112,11 @@ function ProviderCard({
 					</p>
 				</div>
 				<div className="flex gap-2">
-					<Button onClick={onEdit} variant="outline" size="sm">
+					<Button onClick={onEdit} variant="outline" size="md">
 						{primaryLabel}
 					</Button>
 					{shouldShowRemove && (
-						<Button onClick={onRemove} variant="outline" size="sm" loading={removing}>
+						<Button onClick={onRemove} variant="outline" size="md" loading={removing}>
 							Remove
 						</Button>
 					)}
@@ -3194,7 +3194,7 @@ function ChatGptOAuthDialog({
 									<code className="rounded border border-app-line bg-app-darkerBox px-3 py-1.5 font-mono text-base tracking-widest text-ink">
 										{deviceCodeInfo.userCode}
 									</code>
-									<Button onClick={onCopyDeviceCode} size="sm" variant={deviceCodeCopied ? "secondary" : "outline"}>
+									<Button onClick={onCopyDeviceCode} size="md" variant={deviceCodeCopied ? "secondary" : "outline"}>
 										{deviceCodeCopied ? "Copied" : "Copy"}
 									</Button>
 								</div>
@@ -3209,7 +3209,7 @@ function ChatGptOAuthDialog({
 									<Button
 										onClick={onOpenDeviceLogin}
 										disabled={!deviceCodeCopied}
-										size="sm"
+										size="md"
 										variant="outline"
 									>
 										Open login page
@@ -3242,19 +3242,19 @@ function ChatGptOAuthDialog({
 					{message && !deviceCodeInfo ? (
 						/* Completed — show Done (or Retry for errors) */
 						message.type === "success" ? (
-							<Button onClick={() => onOpenChange(false)} size="sm">
+							<Button onClick={() => onOpenChange(false)} size="md">
 								Done
 							</Button>
 						) : (
 							<>
-								<Button onClick={() => onOpenChange(false)} variant="ghost" size="sm">
+								<Button onClick={() => onOpenChange(false)} variant="outline" size="md">
 									Close
 								</Button>
 								<Button
 									onClick={onRestart}
 									disabled={isRequesting}
 									loading={isRequesting}
-									size="sm"
+									size="md"
 								>
 									Try again
 								</Button>
@@ -3262,7 +3262,7 @@ function ChatGptOAuthDialog({
 						)
 					) : (
 						<>
-							<Button onClick={() => onOpenChange(false)} variant="ghost" size="sm">
+							<Button onClick={() => onOpenChange(false)} variant="outline" size="md">
 								Cancel
 							</Button>
 							{deviceCodeInfo && (
@@ -3271,7 +3271,7 @@ function ChatGptOAuthDialog({
 									disabled={isRequesting}
 									loading={isRequesting}
 									variant="outline"
-									size="sm"
+									size="md"
 								>
 									Get new code
 								</Button>

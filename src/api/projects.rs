@@ -4,7 +4,8 @@ use super::state::ApiState;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
+use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -49,20 +50,13 @@ fn sanitize_segment(name: &str) -> Result<String, StatusCode> {
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
-pub(super) struct AgentQuery {
-    agent_id: String,
-}
-
-#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub(super) struct ProjectListQuery {
-    agent_id: String,
     #[serde(default)]
     status: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct CreateProjectRequest {
-    agent_id: String,
     name: String,
     #[serde(default)]
     description: Option<String>,
@@ -80,7 +74,6 @@ pub(super) struct CreateProjectRequest {
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct UpdateProjectRequest {
-    agent_id: String,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -97,7 +90,6 @@ pub(super) struct UpdateProjectRequest {
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct CreateRepoRequest {
-    agent_id: String,
     name: String,
     path: String,
     #[serde(default)]
@@ -110,7 +102,6 @@ pub(super) struct CreateRepoRequest {
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct CreateWorktreeRequest {
-    agent_id: String,
     repo_id: String,
     branch: String,
     #[serde(default)]
@@ -169,11 +160,12 @@ fn default_true() -> bool {
 
 /// Refresh the sandbox allowlist with project root paths after a project
 /// create, delete, or scan. Best-effort — logs and continues on error.
-async fn refresh_sandbox(state: &ApiState, agent_id: &str) {
+async fn refresh_sandbox(state: &ApiState) {
     let stores = state.project_stores.load();
+    let Some(store) = stores.values().next() else { return };
     let sandboxes = state.sandboxes.load();
-    if let (Some(store), Some(sandbox)) = (stores.get(agent_id), sandboxes.get(agent_id)) {
-        crate::projects::refresh_sandbox_project_paths(store, agent_id, sandbox).await;
+    for sandbox in sandboxes.values() {
+        crate::projects::refresh_sandbox_project_paths(store, sandbox).await;
     }
 }
 
@@ -309,7 +301,7 @@ async fn compute_and_cache_disk_usage(
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// GET /agents/projects — list projects for an agent.
+/// GET /agents/projects — list projects.
 #[utoipa::path(
     get,
     path = "/agents/projects",
@@ -318,7 +310,7 @@ async fn compute_and_cache_disk_usage(
     ),
     responses(
         (status = 200, body = ProjectListResponse),
-        (status = 404, description = "Agent not found"),
+        (status = 404, description = "No project store available"),
     ),
     tag = "projects",
 )]
@@ -327,12 +319,12 @@ pub(super) async fn list_projects(
     Query(query): Query<ProjectListQuery>,
 ) -> Result<Json<ProjectListResponse>, StatusCode> {
     let stores = state.project_stores.load();
-    let store = stores.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = stores.values().next().ok_or(StatusCode::NOT_FOUND)?;
 
     let status = query.status.as_deref().and_then(ProjectStatus::parse);
 
     let projects = store
-        .list_projects(&query.agent_id, status)
+        .list_projects(status)
         .await
         .map_err(|error| {
             tracing::error!(%error, "failed to list projects");
@@ -349,7 +341,7 @@ pub(super) async fn list_projects(
     request_body = CreateProjectRequest,
     responses(
         (status = 200, body = ProjectResponse),
-        (status = 404, description = "Agent not found"),
+        (status = 404, description = "No project store available"),
     ),
     tag = "projects",
 )]
@@ -358,11 +350,10 @@ pub(super) async fn create_project(
     Json(request): Json<CreateProjectRequest>,
 ) -> Result<Json<ProjectResponse>, StatusCode> {
     let stores = state.project_stores.load();
-    let store = stores.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = stores.values().next().ok_or(StatusCode::NOT_FOUND)?;
 
     let project = store
         .create_project(CreateProjectInput {
-            agent_id: request.agent_id.clone(),
             name: request.name,
             description: request.description.unwrap_or_default(),
             icon: request.icon.unwrap_or_default(),
@@ -379,43 +370,53 @@ pub(super) async fn create_project(
         })?;
 
     // Refresh sandbox allowlist with new project path.
-    refresh_sandbox(&state, &request.agent_id).await;
+    refresh_sandbox(&state).await;
 
     // Auto-discover repos, worktrees, and disk usage in the background so the
     // API responds immediately. The UI will pick up discovered repos on its
     // next query invalidation / refetch.
-    if request.auto_discover {
+    {
         let root = std::path::PathBuf::from(&request.root_path);
         if root.is_dir() {
             let store = store.clone();
             let project_id = project.id.clone();
+            let auto_discover = request.auto_discover;
             tokio::spawn(async move {
-                match crate::projects::git::discover_repos(&root).await {
-                    Ok(discovered) => {
-                        for repo in discovered {
-                            if let Err(error) = store
-                                .create_repo(CreateRepoInput {
-                                    project_id: project_id.clone(),
-                                    name: repo.name,
-                                    path: repo.relative_path,
-                                    remote_url: repo.remote_url,
-                                    default_branch: repo.default_branch,
-                                    current_branch: repo.current_branch,
-                                    description: String::new(),
-                                })
-                                .await
-                            {
-                                tracing::warn!(%error, "failed to register discovered repo");
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "failed to discover repos in project root");
+                // Detect and set project logo.
+                if let Some(logo) = crate::projects::detect_logo(&root) {
+                    if let Err(error) = store.set_logo_path(&project_id, Some(&logo)).await {
+                        tracing::warn!(%error, "failed to set detected logo path");
                     }
                 }
 
-                discover_and_register_worktrees(&store, &project_id, &root).await;
-                compute_and_cache_disk_usage(&store, &project_id, &root).await;
+                if auto_discover {
+                    match crate::projects::git::discover_repos(&root).await {
+                        Ok(discovered) => {
+                            for repo in discovered {
+                                if let Err(error) = store
+                                    .create_repo(CreateRepoInput {
+                                        project_id: project_id.clone(),
+                                        name: repo.name,
+                                        path: repo.relative_path,
+                                        remote_url: repo.remote_url,
+                                        default_branch: repo.default_branch,
+                                        current_branch: repo.current_branch,
+                                        description: String::new(),
+                                    })
+                                    .await
+                                {
+                                    tracing::warn!(%error, "failed to register discovered repo");
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to discover repos in project root");
+                        }
+                    }
+
+                    discover_and_register_worktrees(&store, &project_id, &root).await;
+                    compute_and_cache_disk_usage(&store, &project_id, &root).await;
+                }
 
                 tracing::info!(project_id = %project_id, "background project scan complete");
             });
@@ -424,7 +425,7 @@ pub(super) async fn create_project(
 
     // Return the project immediately (repos/worktrees populate asynchronously).
     let full = store
-        .get_project_with_relations(&request.agent_id, &project.id)
+        .get_project_with_relations(&project.id)
         .await
         .map_err(|error| {
             tracing::error!(%error, "failed to load project with relations");
@@ -441,24 +442,22 @@ pub(super) async fn create_project(
     path = "/agents/projects/{id}",
     params(
         ("id" = String, Path, description = "Project ID"),
-        AgentQuery,
     ),
     responses(
         (status = 200, body = ProjectResponse),
-        (status = 404, description = "Agent or project not found"),
+        (status = 404, description = "Project not found"),
     ),
     tag = "projects",
 )]
 pub(super) async fn get_project(
     State(state): State<Arc<ApiState>>,
     Path(project_id): Path<String>,
-    Query(query): Query<AgentQuery>,
 ) -> Result<Json<ProjectResponse>, StatusCode> {
     let stores = state.project_stores.load();
-    let store = stores.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = stores.values().next().ok_or(StatusCode::NOT_FOUND)?;
 
     let project = store
-        .get_project_with_relations(&query.agent_id, &project_id)
+        .get_project_with_relations(&project_id)
         .await
         .map_err(|error| {
             tracing::error!(%error, "failed to get project");
@@ -479,7 +478,7 @@ pub(super) async fn get_project(
     request_body = UpdateProjectRequest,
     responses(
         (status = 200, body = ProjectResponse),
-        (status = 404, description = "Agent or project not found"),
+        (status = 404, description = "Project not found"),
     ),
     tag = "projects",
 )]
@@ -489,13 +488,12 @@ pub(super) async fn update_project(
     Json(request): Json<UpdateProjectRequest>,
 ) -> Result<Json<ProjectResponse>, StatusCode> {
     let stores = state.project_stores.load();
-    let store = stores.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = stores.values().next().ok_or(StatusCode::NOT_FOUND)?;
 
     let status = request.status.as_deref().and_then(ProjectStatus::parse);
 
     store
         .update_project(
-            &request.agent_id,
             &project_id,
             UpdateProjectInput {
                 name: request.name,
@@ -504,6 +502,7 @@ pub(super) async fn update_project(
                 tags: request.tags,
                 settings: request.settings,
                 status,
+                ..Default::default()
             },
         )
         .await
@@ -515,7 +514,7 @@ pub(super) async fn update_project(
 
     // Reload with relations.
     let full = store
-        .get_project_with_relations(&request.agent_id, &project_id)
+        .get_project_with_relations(&project_id)
         .await
         .map_err(|error| {
             tracing::error!(%error, "failed to reload project");
@@ -532,24 +531,22 @@ pub(super) async fn update_project(
     path = "/agents/projects/{id}",
     params(
         ("id" = String, Path, description = "Project ID"),
-        AgentQuery,
     ),
     responses(
         (status = 200, body = ActionResponse),
-        (status = 404, description = "Agent or project not found"),
+        (status = 404, description = "Project not found"),
     ),
     tag = "projects",
 )]
 pub(super) async fn delete_project(
     State(state): State<Arc<ApiState>>,
     Path(project_id): Path<String>,
-    Query(query): Query<AgentQuery>,
 ) -> Result<Json<ActionResponse>, StatusCode> {
     let stores = state.project_stores.load();
-    let store = stores.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = stores.values().next().ok_or(StatusCode::NOT_FOUND)?;
 
     let deleted = store
-        .delete_project(&query.agent_id, &project_id)
+        .delete_project(&project_id)
         .await
         .map_err(|error| {
             tracing::error!(%error, "failed to delete project");
@@ -561,7 +558,7 @@ pub(super) async fn delete_project(
     }
 
     // Refresh sandbox allowlist after removing project path.
-    refresh_sandbox(&state, &query.agent_id).await;
+    refresh_sandbox(&state).await;
 
     Ok(Json(ActionResponse {
         success: true,
@@ -575,24 +572,22 @@ pub(super) async fn delete_project(
     path = "/agents/projects/{id}/scan",
     params(
         ("id" = String, Path, description = "Project ID"),
-        AgentQuery,
     ),
     responses(
         (status = 200, body = ProjectResponse),
-        (status = 404, description = "Agent or project not found"),
+        (status = 404, description = "Project not found"),
     ),
     tag = "projects",
 )]
 pub(super) async fn scan_project(
     State(state): State<Arc<ApiState>>,
     Path(project_id): Path<String>,
-    Query(query): Query<AgentQuery>,
 ) -> Result<Json<ProjectResponse>, StatusCode> {
     let stores = state.project_stores.load();
-    let store = stores.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = stores.values().next().ok_or(StatusCode::NOT_FOUND)?;
 
     let project = store
-        .get_project(&query.agent_id, &project_id)
+        .get_project(&project_id)
         .await
         .map_err(|error| {
             tracing::error!(%error, "failed to get project for scan");
@@ -651,9 +646,18 @@ pub(super) async fn scan_project(
     // Recompute and cache disk usage.
     compute_and_cache_disk_usage(store, &project_id, &root).await;
 
+    // Re-detect project logo.
+    let logo = crate::projects::detect_logo(&root);
+    if let Err(error) = store
+        .set_logo_path(&project_id, logo.as_deref())
+        .await
+    {
+        tracing::warn!(%error, "failed to update logo path during scan");
+    }
+
     // Reload with relations.
     let full = store
-        .get_project_with_relations(&query.agent_id, &project_id)
+        .get_project_with_relations(&project_id)
         .await
         .map_err(|error| {
             tracing::error!(%error, "failed to reload project after scan");
@@ -662,7 +666,7 @@ pub(super) async fn scan_project(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     // Refresh sandbox allowlist (scan may have added new repos/worktrees).
-    refresh_sandbox(&state, &query.agent_id).await;
+    refresh_sandbox(&state).await;
 
     Ok(Json(ProjectResponse { project: full }))
 }
@@ -677,7 +681,7 @@ pub(super) async fn scan_project(
     request_body = CreateRepoRequest,
     responses(
         (status = 200, body = RepoResponse),
-        (status = 404, description = "Agent or project not found"),
+        (status = 404, description = "Project not found"),
     ),
     tag = "projects",
 )]
@@ -687,11 +691,11 @@ pub(super) async fn create_repo(
     Json(request): Json<CreateRepoRequest>,
 ) -> Result<Json<RepoResponse>, StatusCode> {
     let stores = state.project_stores.load();
-    let store = stores.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = stores.values().next().ok_or(StatusCode::NOT_FOUND)?;
 
     // Verify project exists.
     store
-        .get_project(&request.agent_id, &project_id)
+        .get_project(&project_id)
         .await
         .map_err(|error| {
             tracing::error!(%error, "failed to verify project");
@@ -728,21 +732,19 @@ pub(super) async fn create_repo(
     params(
         ("project_id" = String, Path, description = "Project ID"),
         ("repo_id" = String, Path, description = "Repository ID"),
-        AgentQuery,
     ),
     responses(
         (status = 200, body = ActionResponse),
-        (status = 404, description = "Agent, project, or repo not found"),
+        (status = 404, description = "Project or repo not found"),
     ),
     tag = "projects",
 )]
 pub(super) async fn delete_repo(
     State(state): State<Arc<ApiState>>,
     Path((project_id, repo_id)): Path<(String, String)>,
-    Query(query): Query<AgentQuery>,
 ) -> Result<Json<ActionResponse>, StatusCode> {
     let stores = state.project_stores.load();
-    let store = stores.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = stores.values().next().ok_or(StatusCode::NOT_FOUND)?;
 
     // Verify the repo belongs to this project.
     let repo = store
@@ -782,7 +784,7 @@ pub(super) async fn delete_repo(
     request_body = CreateWorktreeRequest,
     responses(
         (status = 200, body = WorktreeResponse),
-        (status = 404, description = "Agent, project, or repo not found"),
+        (status = 404, description = "Project or repo not found"),
     ),
     tag = "projects",
 )]
@@ -792,11 +794,11 @@ pub(super) async fn create_worktree(
     Json(request): Json<CreateWorktreeRequest>,
 ) -> Result<Json<WorktreeResponse>, StatusCode> {
     let stores = state.project_stores.load();
-    let store = stores.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = stores.values().next().ok_or(StatusCode::NOT_FOUND)?;
 
     // Look up the project and repo.
     let project = store
-        .get_project(&request.agent_id, &project_id)
+        .get_project(&project_id)
         .await
         .map_err(|error| {
             tracing::error!(%error, "failed to get project");
@@ -880,21 +882,19 @@ pub(super) async fn create_worktree(
     params(
         ("project_id" = String, Path, description = "Project ID"),
         ("worktree_id" = String, Path, description = "Worktree ID"),
-        AgentQuery,
     ),
     responses(
         (status = 200, body = ActionResponse),
-        (status = 404, description = "Agent, project, or worktree not found"),
+        (status = 404, description = "Project or worktree not found"),
     ),
     tag = "projects",
 )]
 pub(super) async fn delete_worktree(
     State(state): State<Arc<ApiState>>,
     Path((project_id, worktree_id)): Path<(String, String)>,
-    Query(query): Query<AgentQuery>,
 ) -> Result<Json<ActionResponse>, StatusCode> {
     let stores = state.project_stores.load();
-    let store = stores.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = stores.values().next().ok_or(StatusCode::NOT_FOUND)?;
 
     // Look up worktree and project for the git removal.
     let worktree = store
@@ -912,7 +912,7 @@ pub(super) async fn delete_worktree(
     }
 
     let project = store
-        .get_project(&query.agent_id, &project_id)
+        .get_project(&project_id)
         .await
         .map_err(|error| {
             tracing::error!(%error, "failed to get project");
@@ -965,24 +965,22 @@ pub(super) async fn delete_worktree(
     path = "/agents/projects/{id}/disk-usage",
     params(
         ("id" = String, Path, description = "Project ID"),
-        AgentQuery,
     ),
     responses(
         (status = 200, body = DiskUsageResponse),
-        (status = 404, description = "Agent or project not found"),
+        (status = 404, description = "Project not found"),
     ),
     tag = "projects",
 )]
 pub(super) async fn disk_usage(
     State(state): State<Arc<ApiState>>,
     Path(project_id): Path<String>,
-    Query(query): Query<AgentQuery>,
 ) -> Result<Json<DiskUsageResponse>, StatusCode> {
     let stores = state.project_stores.load();
-    let store = stores.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = stores.values().next().ok_or(StatusCode::NOT_FOUND)?;
 
     let project = store
-        .get_project(&query.agent_id, &project_id)
+        .get_project(&project_id)
         .await
         .map_err(|error| {
             tracing::error!(%error, "failed to get project for disk usage");
@@ -1037,6 +1035,68 @@ pub(super) async fn disk_usage(
         total_bytes,
         entries,
     }))
+}
+
+/// GET /agents/projects/{id}/logo — serve the detected project logo.
+#[utoipa::path(
+    get,
+    path = "/agents/projects/{id}/logo",
+    params(
+        ("id" = String, Path, description = "Project ID"),
+    ),
+    responses(
+        (status = 200, description = "Logo image"),
+        (status = 404, description = "No logo found"),
+    ),
+    tag = "projects",
+)]
+pub(super) async fn serve_logo(
+    State(state): State<Arc<ApiState>>,
+    Path(project_id): Path<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let stores = state.project_stores.load();
+    let store = stores.values().next().ok_or(StatusCode::NOT_FOUND)?;
+
+    let project = store
+        .get_project(&project_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "failed to get project for logo");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let logo_rel = project.logo_path.ok_or(StatusCode::NOT_FOUND)?;
+    let root = std::path::PathBuf::from(&project.root_path);
+    let logo_abs = root.join(&logo_rel);
+
+    // Ensure the resolved path is inside the project root (prevent traversal).
+    let canonical_root = root.canonicalize().map_err(|_| StatusCode::NOT_FOUND)?;
+    let canonical_logo = logo_abs.canonicalize().map_err(|_| StatusCode::NOT_FOUND)?;
+    if !canonical_logo.starts_with(&canonical_root) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let data = tokio::fs::read(&canonical_logo)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    let content_type = match logo_rel
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "svg" => "image/svg+xml",
+        "ico" => "image/x-icon",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        _ => "application/octet-stream",
+    };
+
+    Ok(([(header::CONTENT_TYPE, content_type)], data))
 }
 
 /// Recursively calculate directory size. Best-effort — skips entries it can't

@@ -3,7 +3,7 @@ import {useCortexChat, type ToolActivity} from "@/hooks/useCortexChat";
 import {Markdown} from "@/components/Markdown";
 import {ToolCall, type ToolCallPair} from "@/components/ToolCall";
 import {api, type CortexChatToolCall, type CortexChatThread} from "@/api/client";
-import {Button, PopoverRoot, PopoverContent, PopoverTrigger} from "@spaceui/primitives";
+import {Button, CircleButton, CircleButtonGroup, PopoverRoot, PopoverContent, PopoverTrigger} from "@spacedrive/primitives";
 import {Plus, X, Clock, Trash} from "@phosphor-icons/react";
 
 interface CortexChatPanelProps {
@@ -419,57 +419,47 @@ export function CortexChatPanel({
 							</span>
 						)}
 					</div>
-				<div className="flex items-center gap-0.5">
-					<PopoverRoot open={threadListOpen} onOpenChange={setThreadListOpen}>
-						<PopoverTrigger asChild>
-							<Button
-								variant="ghost"
-								size="icon"
-								disabled={isStreaming}
-								className="h-7 w-7"
-								title="Thread history"
-							>
-								<Clock className="h-3.5 w-3.5" />
-							</Button>
-						</PopoverTrigger>
-						<PopoverContent
-							align="end"
-							sideOffset={4}
-							className="w-72 p-0"
-						>
-							<div className="flex items-center justify-between border-b border-app-line/40 px-3 py-2">
-								<span className="text-xs font-medium text-ink-dull">Threads</span>
-							</div>
-							<ThreadList
-								agentId={agentId}
-								currentThreadId={threadId}
-								onSelectThread={loadThread}
-								onClose={() => setThreadListOpen(false)}
-							/>
-						</PopoverContent>
-					</PopoverRoot>
-					<Button
-						onClick={newThread}
-						variant="ghost"
-						size="icon"
+				<CircleButtonGroup>
+					<CircleButton
+						icon={Clock}
 						disabled={isStreaming}
-						className="h-7 w-7"
+						onClick={() => setThreadListOpen(!threadListOpen)}
+						title="Thread history"
+					/>
+					<CircleButton
+						icon={Plus}
+						onClick={newThread}
+						disabled={isStreaming}
 						title="New thread"
-					>
-						<Plus className="h-3.5 w-3.5" />
-					</Button>
+					/>
 					{onClose && (
-						<Button
+						<CircleButton
+							icon={X}
 							onClick={onClose}
-							variant="ghost"
-							size="icon"
-							className="h-7 w-7"
 							title="Close"
-						>
-							<X className="h-3.5 w-3.5" />
-						</Button>
+						/>
 					)}
-				</div>
+				</CircleButtonGroup>
+				<PopoverRoot open={threadListOpen} onOpenChange={setThreadListOpen}>
+					<PopoverTrigger asChild>
+						<span />
+					</PopoverTrigger>
+					<PopoverContent
+						align="end"
+						sideOffset={4}
+						className="w-72 p-0"
+					>
+						<div className="flex items-center justify-between border-b border-app-line/40 px-3 py-2">
+							<span className="text-xs font-medium text-ink-dull">Threads</span>
+						</div>
+						<ThreadList
+							agentId={agentId}
+							currentThreadId={threadId}
+							onSelectThread={loadThread}
+							onClose={() => setThreadListOpen(false)}
+						/>
+					</PopoverContent>
+				</PopoverRoot>
 				</div>
 			)}
 

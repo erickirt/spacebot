@@ -5,8 +5,8 @@ import {
 	type PromptInspectResponse,
 	type PromptSnapshotSummary,
 } from "@/api/client";
-import { Button, DialogRoot, DialogContent, DialogHeader, DialogTitle } from "@spaceui/primitives";
-import { Toggle } from "@/ui/Toggle";
+import { Button, DialogRoot, DialogContent, DialogHeader, DialogTitle } from "@spacedrive/primitives";
+import { Switch } from "@spacedrive/primitives";
 
 interface PromptInspectModalProps {
 	open: boolean;
@@ -102,7 +102,7 @@ export function PromptInspectModal({ open, onOpenChange, channelId }: PromptInsp
 
 						<div className="flex items-center justify-between px-3 py-3">
 							<span className="text-tiny text-ink-faint">Capture</span>
-							<Toggle
+							<Switch
 								size="sm"
 								checked={captureEnabled}
 								onCheckedChange={handleToggleCapture}

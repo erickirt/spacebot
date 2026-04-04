@@ -564,7 +564,6 @@ async fn resolve_directory_from_project(
     }
 
     let store = &deps.project_store;
-    let agent_id = &deps.agent_id;
 
     // Worktree resolution: look up the worktree, derive absolute path from project root.
     if let Some(worktree_id) = worktree_id
@@ -582,7 +581,7 @@ async fn resolve_directory_from_project(
                 "project_id/worktree_id mismatch — using worktree's project"
             );
         }
-        if let Ok(Some(project)) = store.get_project(agent_id, &worktree.project_id).await {
+        if let Ok(Some(project)) = store.get_project(&worktree.project_id).await {
             let abs_path = std::path::Path::new(&project.root_path).join(&worktree.path);
             return Some(abs_path.to_string_lossy().to_string());
         }
@@ -590,7 +589,7 @@ async fn resolve_directory_from_project(
 
     // Project root resolution.
     if let Some(project_id) = project_id
-        && let Ok(Some(project)) = store.get_project(agent_id, project_id).await
+        && let Ok(Some(project)) = store.get_project(project_id).await
     {
         return Some(project.root_path.clone());
     }

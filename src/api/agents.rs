@@ -867,7 +867,7 @@ pub async fn create_agent_internal(
     let project_store = std::sync::Arc::new(crate::projects::ProjectStore::new(db.sqlite.clone()));
 
     // Inject active project root paths into the sandbox allowlist.
-    crate::projects::refresh_sandbox_project_paths(&project_store, &arc_agent_id, &sandbox).await;
+    crate::projects::refresh_sandbox_project_paths(&project_store, &sandbox).await;
 
     let deps = crate::AgentDeps {
         agent_id: arc_agent_id.clone(),

@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { ChannelCard } from "@/components/ChannelCard";
-import { Button, SearchInput } from "@spaceui/primitives";
+import { Button, SearchBar } from "@spacedrive/primitives";
 import type { ChannelLiveState } from "@/hooks/useChannelLiveState";
 import { GearSix } from "@phosphor-icons/react";
 import { useNavigate } from "@tanstack/react-router";
@@ -42,10 +42,10 @@ export function AgentChannels({ agentId, liveStates }: AgentChannelsProps) {
 		<div className="flex h-full flex-col">
 			{hasChannels && (
 				<div className="flex items-center gap-3 border-b border-app-line/50 bg-app-darkBox/20 px-6 py-3">
-					<SearchInput
+					<SearchBar
 						placeholder="Search channels..."
 						value={searchQuery}
-						onChange={(event) => setSearchQuery(event.target.value)}
+						onChange={setSearchQuery}
 						className="flex-1"
 					/>
 				</div>

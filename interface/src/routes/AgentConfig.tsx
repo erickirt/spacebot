@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type AgentConfigResponse, type AgentConfigUpdateRequest } from "@/api/client";
-import { Button, Input, TextArea, NumberStepper, SelectRoot, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@spaceui/primitives";
+import { Button, Input, TextArea, NumberStepper, SelectRoot, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@spacedrive/primitives";
 import { SettingSidebarButton } from "@/ui/SettingSidebarButton";
-import { Toggle } from "@/ui/Toggle";
+import { Switch } from "@spacedrive/primitives";
 import { cx } from "class-variance-authority";
 import { ModelSelect } from "@/components/ModelSelect";
 import { TagInput } from "@/components/TagInput";
 import { Markdown } from "@/components/Markdown";
 import { ProfileAvatar, seedGradient } from "@/components/ProfileAvatar";
+
 import { motion, AnimatePresence } from "framer-motion";
 import { useSearch, useNavigate } from "@tanstack/react-router";
 
@@ -1303,7 +1304,7 @@ function ConfigToggleField({ label, description, value, onChange }: ConfigToggle
 				<label className="text-sm font-medium text-ink">{label}</label>
 				<p className="text-tiny text-ink-faint">{description}</p>
 			</div>
-			<Toggle checked={value} onCheckedChange={onChange} size="lg" />
+			<Switch checked={value} onCheckedChange={onChange} size="lg" />
 		</div>
 	);
 }

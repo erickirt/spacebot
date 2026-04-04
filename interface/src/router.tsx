@@ -28,6 +28,7 @@ import {Settings} from "@/routes/Settings";
 import {Orchestrate} from "@/routes/Orchestrate";
 import {useLiveContext} from "@/hooks/useLiveContext";
 import {AgentTabs} from "@/components/AgentTabs";
+import {FolderOpen} from "@phosphor-icons/react";
 
 // ── Root layout ──────────────────────────────────────────────────────────
 
@@ -93,6 +94,23 @@ const indexRoute = createRoute({
 	component: function IndexPage() {
 		const {liveStates, activeLinks} = useLiveContext();
 		return <Overview liveStates={liveStates} activeLinks={activeLinks} />;
+	},
+});
+
+const dashboardRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/dashboard",
+	component: function DashboardPage() {
+		useSetTopBar(
+			<div className="flex h-full items-center px-6">
+				<h1 className="font-plex text-sm font-medium text-ink">Dashboard</h1>
+			</div>,
+		);
+		return (
+			<div className="flex flex-1 items-center justify-center">
+				<p className="text-sm text-ink-faint">Dashboard coming soon</p>
+			</div>
+		);
 	},
 });
 
@@ -257,19 +275,18 @@ const agentWorkersRoute = createRoute({
 	},
 });
 
-const agentProjectsRoute = createRoute({
+const projectsRoute = createRoute({
 	getParentRoute: () => rootRoute,
-	path: "/agents/$agentId/projects",
-	component: function AgentProjectsPage() {
-		const {agentId} = agentProjectsRoute.useParams();
-		return (
-			<div className="flex h-full flex-col">
-				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
-					<AgentProjects agentId={agentId} />
-				</div>
-			</div>
+	path: "/projects",
+	component: function ProjectsPage() {
+		useSetTopBar(
+			<div className="flex h-full items-center gap-4 px-6">
+				<FolderOpen className="size-4 text-ink-dull" weight="bold" />
+				<h1 className="font-plex text-sm font-medium text-ink">Projects</h1>
+				<span className="text-xs text-ink-faint">All projects across agents</span>
+			</div>,
 		);
+		return <AgentProjects />;
 	},
 });
 
@@ -384,6 +401,7 @@ const channelRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
 	indexRoute,
+	dashboardRoute,
 	settingsRoute,
 	logsRoute,
 	orchestrateRoute,
@@ -394,7 +412,7 @@ const routeTree = rootRoute.addChildren([
 	agentMemoriesRoute,
 	agentIngestRoute,
 	agentWorkersRoute,
-	agentProjectsRoute,
+	projectsRoute,
 	agentTasksRoute,
 	agentCortexRoute,
 	agentSkillsRoute,

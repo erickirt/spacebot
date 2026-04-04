@@ -5,21 +5,20 @@ pub mod store;
 
 pub use store::{
     CreateProjectInput, CreateRepoInput, CreateWorktreeInput, Project, ProjectRepo, ProjectStatus,
-    ProjectStore, ProjectWorktree, UpdateProjectInput,
+    ProjectStore, ProjectWorktree, UpdateProjectInput, detect_logo,
 };
 
 /// Refresh the sandbox allowlist with all active project root paths.
 ///
-/// Queries all active projects for the agent and injects their root paths
-/// into the sandbox config. Takes effect immediately for subsequent subprocess
-/// calls. Should be called after project create/delete/scan.
+/// Queries all active projects and injects their root paths into the sandbox
+/// config. Takes effect immediately for subsequent subprocess calls. Should be
+/// called after project create/delete/scan.
 pub async fn refresh_sandbox_project_paths(
     project_store: &ProjectStore,
-    agent_id: &str,
     sandbox: &crate::sandbox::Sandbox,
 ) {
     let projects = match project_store
-        .list_projects(agent_id, Some(ProjectStatus::Active))
+        .list_projects(Some(ProjectStatus::Active))
         .await
     {
         Ok(projects) => projects,

@@ -709,7 +709,6 @@ pub(super) async fn inspect_prompt(
         let store = &channel_state.deps.project_store;
         let projects = store
             .list_projects(
-                &channel_state.deps.agent_id,
                 Some(crate::projects::ProjectStatus::Active),
             )
             .await

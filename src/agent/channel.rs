@@ -2194,7 +2194,6 @@ impl Channel {
         let store = &self.deps.project_store;
         let projects = match store
             .list_projects(
-                &self.deps.agent_id,
                 Some(crate::projects::ProjectStatus::Active),
             )
             .await
