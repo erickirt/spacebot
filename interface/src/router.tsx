@@ -9,6 +9,7 @@ import {BASE_PATH} from "@/api/client";
 import {ConnectionBanner} from "@/components/ConnectionBanner";
 import {Sidebar} from "@/components/Sidebar";
 import {Overview} from "@/routes/Overview";
+import {Dashboard} from "@/routes/Dashboard";
 import {AgentDetail} from "@/routes/AgentDetail";
 import {AgentChannels} from "@/routes/AgentChannels";
 import {AgentCortex} from "@/routes/AgentCortex";
@@ -71,13 +72,7 @@ const indexRoute = createRoute({
 const dashboardRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/dashboard",
-	component: function DashboardPage() {
-		return (
-			<div className="flex flex-1 items-center justify-center">
-				<p className="text-sm text-ink-faint">Dashboard coming soon</p>
-			</div>
-		);
-	},
+	component: Dashboard,
 });
 
 const settingsRoute = createRoute({
