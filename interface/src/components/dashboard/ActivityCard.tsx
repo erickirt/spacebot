@@ -27,7 +27,6 @@ const SERIES = [
 	{ key: "messages", label: "Messages", color: "#3b82f6" },
 	{ key: "branches", label: "Branches", color: "#8b5cf6" },
 	{ key: "workers", label: "Workers", color: "#f59e0b" },
-	{ key: "cortex", label: "Cortex", color: "#06b6d4" },
 	{ key: "cron", label: "Cron", color: "#10b981" },
 ] as const;
 
@@ -74,12 +73,11 @@ export function ActivityCard() {
 		messages: d.messages,
 		branches: d.branches,
 		workers: d.workers,
-		cortex: d.cortex,
 		cron: d.cron,
 	}));
 
 	const totals = data?.totals;
-	const hasData = totals && (totals.messages + totals.branches + totals.workers + totals.cortex + totals.cron) > 0;
+	const hasData = totals && (totals.messages + totals.branches + totals.workers + totals.cron) > 0;
 
 	return (
 		<Card variant="dark" className="flex flex-col">
