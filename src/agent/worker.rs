@@ -254,6 +254,7 @@ impl Worker {
         prior_history: Vec<rig::message::Message>,
     ) -> (Self, mpsc::Sender<String>, mpsc::Sender<String>) {
         let (input_tx, input_rx) = mpsc::channel(32);
+        let wiki_write = deps.wiki_store.is_some();
         let (mut worker, inject_tx) = Self::build(
             channel_id,
             task,
@@ -266,7 +267,7 @@ impl Worker {
             Some(input_rx),
             Vec::new(), // initial_history - will be replaced by prior_history below
             WorkerMemoryMode::None, // Resumed workers don't have context settings
-            false,      // Resumed workers don't get wiki tools re-injected
+            wiki_write,
             None,       // Resumed workers don't have model override
         );
         // Reuse the original worker ID so DB row stays linked.

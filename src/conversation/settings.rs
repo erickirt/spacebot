@@ -5,6 +5,10 @@
 
 use serde::{Deserialize, Serialize};
 
+fn default_true() -> bool {
+    true
+}
+
 /// Memory mode controls how memory is used in a conversation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -141,9 +145,9 @@ pub struct WorkerContextMode {
     pub history: WorkerHistoryMode,
     /// What memory context the worker gets.
     pub memory: WorkerMemoryMode,
-    /// Whether the worker gets wiki write tools (wiki_create, wiki_edit, wiki_read, wiki_list,
-    /// wiki_search). Enable when explicitly tasking a worker with wiki creation or maintenance.
-    #[serde(default)]
+    /// Whether the worker gets wiki tools (wiki_create, wiki_edit, wiki_read, wiki_list,
+    /// wiki_search, wiki_history). Defaults to true so all workers can access the wiki.
+    #[serde(default = "default_true")]
     pub wiki_write: bool,
 }
 
