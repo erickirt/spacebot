@@ -476,7 +476,10 @@ pub(super) async fn trigger_warmup(
         let humans = (**state.agent_humans.load()).clone();
         let notif_store_warmup = state.notification_store.load().as_ref().clone();
         tokio::spawn(async move {
-            let (event_tx, memory_event_tx, tool_output_tx) = crate::create_process_event_buses();
+            let process_event_buses = crate::create_process_event_buses();
+            let event_tx = process_event_buses.control;
+            let memory_event_tx = process_event_buses.memory;
+            let tool_output_tx = process_event_buses.tool_output;
             let working_memory_tz = runtime_config
                 .user_timezone
                 .load()
@@ -803,7 +806,10 @@ pub async fn create_agent_internal(
         .clone()
         .ok_or_else(|| "global task store not initialized".to_string())?;
 
-    let (event_tx, memory_event_tx, tool_output_tx) = crate::create_process_event_buses();
+    let process_event_buses = crate::create_process_event_buses();
+    let event_tx = process_event_buses.control;
+    let memory_event_tx = process_event_buses.memory;
+    let tool_output_tx = process_event_buses.tool_output;
     let arc_agent_id: crate::AgentId = std::sync::Arc::from(agent_id.as_str());
 
     crate::identity::scaffold_identity_files(&agent_config.identity_dir)

@@ -885,7 +885,6 @@ pub fn create_worker_tool_server(
                 ProcessId::Worker(worker_id),
                 channel_id.clone(),
                 agent_id.clone(),
-                format!("shell_{}", uuid::Uuid::new_v4()),
             ),
         )
         .tool(TaskUpdateTool::for_worker(

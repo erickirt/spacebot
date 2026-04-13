@@ -209,13 +209,15 @@ impl<M: CompletionModel> PromptHook<M> for CortexChatHook {
                 .record_tool_result_metrics(tool_name, internal_call_id);
             return guard_action;
         }
+        let call_id = _tool_call_id.unwrap_or_else(|| internal_call_id.to_string());
         let preview = crate::tools::truncate_utf8_ellipsis(result, 200);
-        self.spacebot_hook
-            .emit_tool_completed_event_from_capped(tool_name, preview.clone());
+        self.spacebot_hook.emit_tool_completed_event_from_capped(
+            tool_name,
+            call_id.clone(),
+            preview.clone(),
+        );
         self.spacebot_hook
             .record_tool_result_metrics(tool_name, internal_call_id);
-
-        let call_id = internal_call_id.to_string();
 
         // Update the accumulated tool call with the result
         {

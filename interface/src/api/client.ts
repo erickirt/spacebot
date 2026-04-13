@@ -195,6 +195,7 @@ export interface ToolStartedEvent {
 	channel_id: string | null;
 	process_type: ProcessType;
 	process_id: string;
+	call_id: string;
 	tool_name: string;
 	args: string;
 }
@@ -218,6 +219,7 @@ export interface ToolCompletedEvent {
 	channel_id: string | null;
 	process_type: ProcessType;
 	process_id: string;
+	call_id: string;
 	tool_name: string;
 	result: string;
 }

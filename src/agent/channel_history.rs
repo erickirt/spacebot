@@ -1143,6 +1143,7 @@ mod tests {
             agent_id: Arc::from("agent"),
             process_id: process_id.clone(),
             channel_id: Some(channel_id.clone()),
+            call_id: "call-related".to_string(),
             tool_name: "memory_save".to_string(),
             args: "{}".to_string(),
         };
@@ -1150,6 +1151,7 @@ mod tests {
             agent_id: Arc::from("agent"),
             process_id,
             channel_id: Some(other_channel),
+            call_id: "call-unrelated".to_string(),
             tool_name: "memory_save".to_string(),
             args: "{}".to_string(),
         };

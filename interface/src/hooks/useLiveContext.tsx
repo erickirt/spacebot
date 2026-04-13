@@ -3,11 +3,13 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type AgentMessageEvent, type ChannelInfo, type ToolStartedEvent, type ToolCompletedEvent, type ToolOutputEvent, type OpenCodePart, type OpenCodePartUpdatedEvent, type WorkerTextEvent } from "@/api/client";
 import type { TranscriptStep as SchemaTranscriptStep } from "@/api/types";
 
+type ToolResultStatus = "pending" | "final" | "waiting_for_input";
+
 /** Extended TranscriptStep with live_output for streaming shell output */
 type TranscriptStep = SchemaTranscriptStep & {
 	live_output?: string;
+	status?: ToolResultStatus;
 };
-import { generateId } from "@/lib/id";
 import { useEventSource, type ConnectionState } from "@/hooks/useEventSource";
 import { useChannelLiveState, type ChannelLiveState, type ActiveWorker } from "@/hooks/useChannelLiveState";
 import { useServer } from "@/hooks/useServer";
@@ -54,6 +56,22 @@ export function useLiveContext() {
 /** Duration (ms) an edge stays "active" after a message flows through it. */
 const LINK_ACTIVE_DURATION = 3000;
 
+function toolResultStatusFromText(result: string): ToolResultStatus {
+	if (
+		result.includes('"waiting_for_input":true') ||
+		result.includes('"waiting_for_input": true') ||
+		result.includes("Command appears to be waiting for interactive input.")
+	) {
+		return "waiting_for_input";
+	}
+	return "final";
+}
+
+function appendLiveOutput(existingOutput: string | undefined, line: string) {
+	if (!existingOutput) return `${line}\n`;
+	return `${existingOutput}${line}\n`;
+}
+
 export function LiveContextProvider({ children, onBootstrapped }: { children: ReactNode; onBootstrapped?: () => void }) {
 	const queryClient = useQueryClient();
 
@@ -84,8 +102,6 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 	const [liveOpenCodeParts, setLiveOpenCodeParts] = useState<Record<string, Map<string, OpenCodePart>>>({});
 
 	// Derive flat active workers from channel live states
-	const pendingToolCallIdsRef = useRef<Record<string, Record<string, string[]>>>({});
-
 	const activeWorkers = useMemo(() => {
 		const channelAgentIds = new Map(channels.map((channel) => [channel.id, channel.agent_id]));
 		const map: Record<string, ActiveWorker & { channelId?: string; agentId: string }> = {};
@@ -149,7 +165,6 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 		const event = data as { worker_id: string };
 		setLiveTranscripts((prev) => ({ ...prev, [event.worker_id]: [] }));
 		setLiveOpenCodeParts((prev) => ({ ...prev, [event.worker_id]: new Map() }));
-		delete pendingToolCallIdsRef.current[event.worker_id];
 		bumpWorkerVersion();
 	}, [channelHandlers, bumpWorkerVersion]);
 
@@ -169,7 +184,6 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 	const wrappedWorkerCompleted = useCallback((data: unknown) => {
 		channelHandlers.worker_completed(data);
 		const event = data as { worker_id: string };
-		delete pendingToolCallIdsRef.current[event.worker_id];
 		// Clean up live OpenCode parts — persisted transcript takes over
 		setLiveOpenCodeParts((prev) => {
 			const next = { ...prev };
@@ -183,13 +197,20 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 		channelHandlers.tool_started(data);
 		const event = data as ToolStartedEvent;
 		if (event.process_type === "worker") {
-			const callId = generateId();
-			const pendingByTool = pendingToolCallIdsRef.current[event.process_id] ?? {};
-			const queue = pendingByTool[event.tool_name] ?? [];
-			pendingByTool[event.tool_name] = [...queue, callId];
-			pendingToolCallIdsRef.current[event.process_id] = pendingByTool;
+			const callId = event.call_id || `${event.process_id}:${event.tool_name}:started`;
 			setLiveTranscripts((prev) => {
 				const steps = prev[event.process_id] ?? [];
+				const pendingResultIndex = steps.findIndex(
+					(step) =>
+						step.type === "tool_result" &&
+						step.name === event.tool_name &&
+						(step as TranscriptStep).status === "pending" &&
+						step.text === "",
+				);
+				const pendingResult = pendingResultIndex >= 0 ? steps[pendingResultIndex] : null;
+				const nextSteps = pendingResult
+					? steps.filter((_, index) => index !== pendingResultIndex)
+					: steps;
 				const step: TranscriptStep = {
 					type: "action",
 					content: [{
@@ -199,7 +220,15 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 						args: event.args || "",
 					}],
 				};
-				return { ...prev, [event.process_id]: [...steps, step] };
+				const retargetedResult = pendingResult
+					? {...pendingResult, call_id: callId}
+					: null;
+				return {
+					...prev,
+					[event.process_id]: retargetedResult
+						? [...nextSteps, step, retargetedResult]
+						: [...nextSteps, step],
+				};
 			});
 			bumpWorkerVersion();
 		}
@@ -209,27 +238,24 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 		channelHandlers.tool_completed(data);
 		const event = data as ToolCompletedEvent;
 		if (event.process_type === "worker") {
-			const pendingByTool = pendingToolCallIdsRef.current[event.process_id];
-			const queue = pendingByTool?.[event.tool_name] ?? [];
-			const [callId, ...rest] = queue;
-			if (pendingByTool) {
-				if (rest.length > 0) {
-					pendingByTool[event.tool_name] = rest;
-				} else {
-					delete pendingByTool[event.tool_name];
-				}
-				if (Object.keys(pendingByTool).length === 0) {
-					delete pendingToolCallIdsRef.current[event.process_id];
-				}
-			}
+			const callId = event.call_id || `${event.process_id}:${event.tool_name}:completed`;
 			setLiveTranscripts((prev) => {
 				const steps = prev[event.process_id] ?? [];
+				const existingIndex = steps.findIndex(
+					(step) => step.type === "tool_result" && step.call_id === callId,
+				);
 				const step: TranscriptStep = {
 					type: "tool_result",
-					call_id: callId ?? `${event.process_id}:${event.tool_name}:${steps.length}`,
+					call_id: callId,
 					name: event.tool_name,
 					text: event.result || "",
+					status: toolResultStatusFromText(event.result || ""),
 				};
+				if (existingIndex >= 0) {
+					const newSteps = [...steps];
+					newSteps[existingIndex] = step;
+					return { ...prev, [event.process_id]: newSteps };
+				}
 				return { ...prev, [event.process_id]: [...steps, step] };
 			});
 			bumpWorkerVersion();
@@ -249,13 +275,13 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 					// Append to existing result step with buffer size limit
 					const step = steps[existingIndex];
 					const existingOutput = (step as TranscriptStep).live_output ?? "";
-					const combined = existingOutput + event.line;
+					const combined = appendLiveOutput(existingOutput, event.line);
 					// Cap at ~50KB to prevent unbounded growth during long-running commands
 					const MAX_LIVE_OUTPUT_SIZE = 50000;
 					const newOutput = combined.length > MAX_LIVE_OUTPUT_SIZE
 						? combined.slice(-MAX_LIVE_OUTPUT_SIZE)
 						: combined;
-					const updatedStep = { ...step, live_output: newOutput };
+					const updatedStep = { ...step, live_output: newOutput, status: "pending" as const };
 					const newSteps = [...steps];
 					newSteps[existingIndex] = updatedStep;
 					return { ...prev, [event.process_id]: newSteps };
@@ -266,7 +292,8 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 					call_id: event.call_id,
 					name: event.tool_name,
 					text: "",
-					live_output: event.line,
+					live_output: appendLiveOutput(undefined, event.line),
+					status: "pending",
 				};
 				return { ...prev, [event.process_id]: [...steps, step] };
 			});

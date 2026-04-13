@@ -50,8 +50,6 @@ pub struct ShellTool {
     process_id: Option<ProcessId>,
     channel_id: Option<ChannelId>,
     agent_id: Option<AgentId>,
-    /// Stable identifier for this tool invocation, shared across ToolStarted/ToolOutput/ToolCompleted.
-    call_id: Option<String>,
 }
 
 impl ShellTool {
@@ -63,7 +61,6 @@ impl ShellTool {
             process_id: None,
             channel_id: None,
             agent_id: None,
-            call_id: None,
         }
     }
 
@@ -74,13 +71,11 @@ impl ShellTool {
         process_id: ProcessId,
         channel_id: Option<ChannelId>,
         agent_id: AgentId,
-        call_id: String,
     ) -> Self {
         self.tool_output_tx = Some(tool_output_tx);
         self.process_id = Some(process_id);
         self.channel_id = channel_id;
         self.agent_id = Some(agent_id);
-        self.call_id = Some(call_id);
         self
     }
 }
@@ -159,13 +154,14 @@ async fn stream_lines<R: AsyncBufRead + Unpin>(mut reader: R, ctx: &StreamContex
                     (&ctx.tool_output_tx, &ctx.agent_id, &ctx.process_id)
                 {
                     let scrubbed = crate::secrets::scrub::scrub_leaks(&line);
+                    let line = scrubbed.trim_end_matches(['\r', '\n']).to_string();
                     if let Err(err) = tx.send(ProcessEvent::ToolOutput {
                         agent_id: agent_id.clone(),
                         process_id: process_id.clone(),
                         channel_id: ctx.channel_id.clone(),
                         call_id: ctx.call_id.clone(),
                         tool_name: "shell".to_string(),
-                        line: scrubbed,
+                        line,
                         stream: ctx.stream_name.clone(),
                     }) {
                         tracing::trace!(%err, "tool_output broadcast dropped - no receivers");
@@ -359,6 +355,7 @@ impl Tool for ShellTool {
             return run_batch(cmd, timeout).await;
         }
 
+        let call_id = format!("shell_{}", uuid::Uuid::new_v4());
         run_streaming(
             cmd,
             timeout,
@@ -366,7 +363,7 @@ impl Tool for ShellTool {
             &self.process_id,
             &self.channel_id,
             &self.agent_id,
-            &self.call_id,
+            call_id,
         )
         .await
     }
@@ -418,7 +415,7 @@ async fn run_streaming(
     process_id: &Option<ProcessId>,
     channel_id: &Option<ChannelId>,
     agent_id: &Option<AgentId>,
-    call_id: &Option<String>,
+    call_id: String,
 ) -> Result<ShellOutput, ShellError> {
     let mut child = cmd.spawn().map_err(|e| ShellError {
         message: format!("Failed to spawn command: {e}"),
@@ -449,11 +446,6 @@ async fn run_streaming(
         Arc::clone(&interactive_detected),
         Arc::clone(&child_arc),
     );
-
-    // Use the provided call_id or generate one if not available.
-    let call_id = call_id
-        .clone()
-        .unwrap_or_else(|| format!("shell_{}", uuid::Uuid::new_v4()));
 
     let stdout_reader = tokio::io::BufReader::new(stdout_pipe);
     let stderr_reader = tokio::io::BufReader::new(stderr_pipe);

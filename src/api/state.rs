@@ -6,7 +6,7 @@ use crate::agent::status::StatusBlock;
 use crate::config::{
     Binding, DefaultsConfig, DiscordPermissions, RuntimeConfig, SignalPermissions, SlackPermissions,
 };
-use crate::conversation::worker_transcript::{ActionContent, TranscriptStep};
+use crate::conversation::worker_transcript::{ActionContent, ToolResultStatus, TranscriptStep};
 use crate::cron::{CronStore, Scheduler};
 use crate::llm::LlmManager;
 use crate::mcp::McpManager;
@@ -28,6 +28,147 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{RwLock, broadcast, mpsc};
+
+type LiveToolCallIds = Arc<RwLock<HashMap<String, HashMap<String, Vec<String>>>>>;
+
+fn worker_tool_result_status(result: &str) -> ToolResultStatus {
+    if result.contains("\"waiting_for_input\":true")
+        || result.contains("\"waiting_for_input\": true")
+        || result.contains("Command appears to be waiting for interactive input.")
+    {
+        ToolResultStatus::WaitingForInput
+    } else {
+        ToolResultStatus::Final
+    }
+}
+
+fn append_live_output(output: &mut Option<String>, line: &str) {
+    if let Some(existing) = output {
+        existing.push_str(line);
+        existing.push('\n');
+    } else {
+        *output = Some(format!("{line}\n"));
+    }
+}
+
+fn upsert_pending_tool_output(
+    steps: &mut Vec<TranscriptStep>,
+    call_id: String,
+    tool_name: String,
+    line: &str,
+) {
+    if let Some(step) = steps.iter_mut().find(|step| {
+        matches!(
+            step,
+            TranscriptStep::ToolResult {
+                call_id: existing_call_id,
+                ..
+            } if existing_call_id == &call_id
+        )
+    }) && let TranscriptStep::ToolResult {
+        live_output,
+        status,
+        ..
+    } = step
+    {
+        append_live_output(live_output, line);
+        *status = ToolResultStatus::Pending;
+        return;
+    }
+
+    steps.push(TranscriptStep::ToolResult {
+        call_id,
+        name: tool_name,
+        text: String::new(),
+        live_output: Some(format!("{line}\n")),
+        status: ToolResultStatus::Pending,
+    });
+}
+
+fn push_live_tool_call(
+    steps: &mut Vec<TranscriptStep>,
+    call_id: String,
+    tool_name: String,
+    args: String,
+) {
+    let pending_output = steps
+        .iter()
+        .position(|step| {
+            matches!(
+                step,
+                TranscriptStep::ToolResult {
+                    name,
+                    text,
+                    status: ToolResultStatus::Pending,
+                    ..
+                } if name == &tool_name && text.is_empty()
+            )
+        })
+        .map(|index| steps.remove(index));
+
+    steps.push(TranscriptStep::Action {
+        content: vec![ActionContent::ToolCall {
+            id: call_id.clone(),
+            name: tool_name.clone(),
+            args,
+        }],
+    });
+
+    if let Some(TranscriptStep::ToolResult {
+        text,
+        live_output,
+        status,
+        ..
+    }) = pending_output
+    {
+        steps.push(TranscriptStep::ToolResult {
+            call_id,
+            name: tool_name,
+            text,
+            live_output,
+            status,
+        });
+    }
+}
+
+fn upsert_final_tool_result(
+    steps: &mut Vec<TranscriptStep>,
+    call_id: String,
+    tool_name: String,
+    result: String,
+) {
+    let status = worker_tool_result_status(&result);
+    if let Some(step) = steps.iter_mut().find(|step| {
+        matches!(
+            step,
+            TranscriptStep::ToolResult {
+                call_id: existing_call_id,
+                ..
+            } if existing_call_id == &call_id
+        )
+    }) && let TranscriptStep::ToolResult {
+        name,
+        text,
+        live_output,
+        status: existing_status,
+        ..
+    } = step
+    {
+        *name = tool_name;
+        *text = result;
+        *live_output = None;
+        *existing_status = status;
+        return;
+    }
+
+    steps.push(TranscriptStep::ToolResult {
+        call_id,
+        name: tool_name,
+        text: result,
+        live_output: None,
+        status,
+    });
+}
 
 /// Summary of an agent's configuration, exposed via the API.
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
@@ -142,6 +283,12 @@ pub struct ApiState {
     /// recover the transcript without waiting for the worker to complete.
     /// Keyed by worker_id, cleared on worker completion.
     pub live_worker_transcripts: Arc<RwLock<HashMap<String, Vec<TranscriptStep>>>>,
+    /// Active worker tool call IDs keyed by worker_id then tool name.
+    ///
+    /// Event and tool-output buses can be received out of order, so this gives
+    /// the tool-output forwarder the lifecycle call_id whenever the ToolStarted
+    /// event has already arrived.
+    pub live_worker_tool_call_ids: LiveToolCallIds,
     /// In-memory cache of tool calls for running channel turns (direct mode).
     /// Keyed by channel_id, drained when the bot message is persisted.
     pub live_channel_tool_calls: Arc<RwLock<HashMap<String, Vec<ChannelToolCallEntry>>>>,
@@ -245,6 +392,7 @@ pub enum ApiEvent {
         channel_id: Option<String>,
         process_type: String,
         process_id: String,
+        call_id: String,
         tool_name: String,
         args: String,
     },
@@ -254,6 +402,7 @@ pub enum ApiEvent {
         channel_id: Option<String>,
         process_type: String,
         process_id: String,
+        call_id: String,
         tool_name: String,
         result: String,
     },
@@ -377,6 +526,7 @@ impl ApiState {
             agent_groups: ArcSwap::from_pointee(Vec::new()),
             agent_humans: ArcSwap::from_pointee(Vec::new()),
             live_worker_transcripts: Arc::new(RwLock::new(HashMap::new())),
+            live_worker_tool_call_ids: Arc::new(RwLock::new(HashMap::new())),
             live_channel_tool_calls: Arc::new(RwLock::new(HashMap::new())),
             ssh_mutex: tokio::sync::Mutex::new(()),
         }
@@ -428,6 +578,7 @@ impl ApiState {
     ) {
         let api_tx = self.event_tx.clone();
         let live_transcripts = self.live_worker_transcripts.clone();
+        let live_tool_call_ids = self.live_worker_tool_call_ids.clone();
         let live_channel_tools = self.live_channel_tool_calls.clone();
         // Snapshot the notification store at registration time. It is set once
         // at startup before any agents register, so the snapshot is always valid.
@@ -450,6 +601,10 @@ impl ApiState {
                                     .write()
                                     .await
                                     .insert(worker_id.to_string(), Vec::new());
+                                live_tool_call_ids
+                                    .write()
+                                    .await
+                                    .insert(worker_id.to_string(), HashMap::new());
                                 api_tx
                                     .send(ApiEvent::WorkerStarted {
                                         agent_id: agent_id.clone(),
@@ -512,6 +667,10 @@ impl ApiState {
                                 ..
                             } => {
                                 live_transcripts
+                                    .write()
+                                    .await
+                                    .remove(&worker_id.to_string());
+                                live_tool_call_ids
                                     .write()
                                     .await
                                     .remove(&worker_id.to_string());
@@ -586,6 +745,7 @@ impl ApiState {
                             ProcessEvent::ToolStarted {
                                 process_id,
                                 channel_id,
+                                call_id,
                                 tool_name,
                                 args,
                                 ..
@@ -593,18 +753,23 @@ impl ApiState {
                                 let (process_type, id_str) = process_id_info(process_id);
                                 // Accumulate tool call into live transcript for workers.
                                 if let ProcessId::Worker(worker_id) = process_id {
-                                    let call_id = format!("live_{}", uuid::Uuid::new_v4());
-                                    let step = TranscriptStep::Action {
-                                        content: vec![ActionContent::ToolCall {
-                                            id: call_id,
-                                            name: tool_name.clone(),
-                                            args: args.clone(),
-                                        }],
-                                    };
+                                    let worker_key = worker_id.to_string();
+                                    live_tool_call_ids
+                                        .write()
+                                        .await
+                                        .entry(worker_key.clone())
+                                        .or_default()
+                                        .entry(tool_name.clone())
+                                        .or_default()
+                                        .push(call_id.clone());
                                     let mut guard = live_transcripts.write().await;
-                                    if let Some(steps) = guard.get_mut(&worker_id.to_string()) {
-                                        steps.push(step);
-                                    }
+                                    let steps = guard.entry(worker_key).or_default();
+                                    push_live_tool_call(
+                                        steps,
+                                        call_id.clone(),
+                                        tool_name.clone(),
+                                        args.clone(),
+                                    );
                                 }
                                 // Accumulate channel-level tool calls in memory,
                                 // skipping conversation/routing tools.
@@ -613,7 +778,7 @@ impl ApiState {
                                         // skip
                                     } else {
                                         let entry = ChannelToolCallEntry {
-                                            id: uuid::Uuid::new_v4().to_string(),
+                                            id: call_id.clone(),
                                             tool_name: tool_name.clone(),
                                             args: args.clone(),
                                             result: None,
@@ -631,6 +796,7 @@ impl ApiState {
                                         channel_id: channel_id.as_deref().map(|s| s.to_string()),
                                         process_type,
                                         process_id: id_str,
+                                        call_id: call_id.clone(),
                                         tool_name: tool_name.clone(),
                                         args: args.clone(),
                                     })
@@ -639,6 +805,7 @@ impl ApiState {
                             ProcessEvent::ToolCompleted {
                                 process_id,
                                 channel_id,
+                                call_id,
                                 tool_name,
                                 result,
                                 ..
@@ -646,23 +813,38 @@ impl ApiState {
                                 let (process_type, id_str) = process_id_info(process_id);
                                 // Accumulate tool result into live transcript for workers.
                                 if let ProcessId::Worker(worker_id) = process_id {
-                                    let step = TranscriptStep::ToolResult {
-                                        call_id: String::new(),
-                                        name: tool_name.clone(),
-                                        text: result.clone(),
-                                        live_output: None,
-                                    };
-                                    let mut guard = live_transcripts.write().await;
-                                    if let Some(steps) = guard.get_mut(&worker_id.to_string()) {
-                                        steps.push(step);
+                                    let worker_key = worker_id.to_string();
+                                    {
+                                        let mut guard = live_tool_call_ids.write().await;
+                                        if let Some(by_tool) = guard.get_mut(&worker_key) {
+                                            if let Some(queue) = by_tool.get_mut(tool_name) {
+                                                queue.retain(|existing_call_id| {
+                                                    existing_call_id != call_id
+                                                });
+                                                if queue.is_empty() {
+                                                    by_tool.remove(tool_name);
+                                                }
+                                            }
+                                            if by_tool.is_empty() {
+                                                guard.remove(&worker_key);
+                                            }
+                                        }
                                     }
+                                    let mut guard = live_transcripts.write().await;
+                                    let steps = guard.entry(worker_key).or_default();
+                                    upsert_final_tool_result(
+                                        steps,
+                                        call_id.clone(),
+                                        tool_name.clone(),
+                                        result.clone(),
+                                    );
                                 }
                                 // Complete channel-level tool call in memory (FIFO).
                                 if let ProcessId::Channel(ch_id) = process_id {
                                     let mut guard = live_channel_tools.write().await;
                                     if let Some(calls) = guard.get_mut(&ch_id.to_string())
                                         && let Some(entry) = calls.iter_mut().find(|c| {
-                                            c.tool_name == *tool_name && c.status == "running"
+                                            c.id == call_id.as_str() && c.status == "running"
                                         })
                                     {
                                         entry.result = Some(result.clone());
@@ -676,6 +858,7 @@ impl ApiState {
                                         channel_id: channel_id.as_deref().map(|s| s.to_string()),
                                         process_type,
                                         process_id: id_str,
+                                        call_id: call_id.clone(),
                                         tool_name: tool_name.clone(),
                                         result: result.clone(),
                                     })
@@ -831,6 +1014,7 @@ impl ApiState {
     ) {
         let api_tx = self.event_tx.clone();
         let live_transcripts = self.live_worker_transcripts.clone();
+        let live_tool_call_ids = self.live_worker_tool_call_ids.clone();
         tokio::spawn(async move {
             loop {
                 match tool_output_rx.recv().await {
@@ -847,35 +1031,26 @@ impl ApiState {
                         {
                             let (process_type, id_str) = process_id_info(process_id);
                             // Accumulate streaming output into live transcript for workers.
+                            let mut event_call_id = call_id.clone();
                             if let ProcessId::Worker(worker_id) = process_id {
-                                let mut guard = live_transcripts.write().await;
-                                if let Some(steps) = guard.get_mut(&worker_id.to_string()) {
-                                    // Find existing ToolResult for this call_id or create new one.
-                                    let pos = steps.iter().position(|s| {
-                                        matches!(s, TranscriptStep::ToolResult { call_id: cid, .. } if cid == call_id)
-                                    });
-                                    if let Some(idx) = pos {
-                                        // Append to existing live_output.
-                                        if let TranscriptStep::ToolResult { live_output, .. } =
-                                            &mut steps[idx]
-                                        {
-                                            if let Some(lo) = live_output {
-                                                lo.push_str(line);
-                                                lo.push('\n');
-                                            } else {
-                                                *live_output = Some(format!("{}\n", line));
-                                            }
-                                        }
-                                    } else {
-                                        // Create new streaming result step.
-                                        steps.push(TranscriptStep::ToolResult {
-                                            call_id: call_id.clone(),
-                                            name: tool_name.clone(),
-                                            text: String::new(),
-                                            live_output: Some(format!("{}\n", line)),
-                                        });
-                                    }
+                                if let Some(active_call_id) = live_tool_call_ids
+                                    .read()
+                                    .await
+                                    .get(&worker_id.to_string())
+                                    .and_then(|by_tool| by_tool.get(tool_name))
+                                    .and_then(|queue| queue.first())
+                                    .cloned()
+                                {
+                                    event_call_id = active_call_id;
                                 }
+                                let mut guard = live_transcripts.write().await;
+                                let steps = guard.entry(worker_id.to_string()).or_default();
+                                upsert_pending_tool_output(
+                                    steps,
+                                    event_call_id.clone(),
+                                    tool_name.clone(),
+                                    line,
+                                );
                             }
                             api_tx
                                 .send(ApiEvent::ToolOutput {
@@ -883,7 +1058,7 @@ impl ApiState {
                                     channel_id: channel_id.as_deref().map(|s| s.to_string()),
                                     process_type,
                                     process_id: id_str,
-                                    call_id: call_id.clone(),
+                                    call_id: event_call_id,
                                     tool_name: tool_name.clone(),
                                     line: line.clone(),
                                     stream: stream.clone(),

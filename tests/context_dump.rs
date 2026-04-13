@@ -87,8 +87,10 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         skills,
     ));
 
-    let (event_tx, memory_event_tx, tool_output_tx) =
-        spacebot::create_process_event_buses_with_capacity(16, 32, 1024);
+    let process_event_buses = spacebot::create_process_event_buses_with_capacity(16, 32, 1024);
+    let event_tx = process_event_buses.control;
+    let memory_event_tx = process_event_buses.memory;
+    let tool_output_tx = process_event_buses.tool_output;
 
     let agent_id: spacebot::AgentId = Arc::from(agent_config.id.as_str());
     let mcp_manager = Arc::new(spacebot::mcp::McpManager::new(agent_config.mcp.clone()));

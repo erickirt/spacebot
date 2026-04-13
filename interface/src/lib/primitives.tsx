@@ -87,10 +87,39 @@ export const Button = React.forwardRef<
 	);
 
 	if (hasHref(props)) {
+		const linkProps = props;
+		const linkDisabled =
+			loading ||
+			linkProps["aria-disabled"] === true ||
+			linkProps["aria-disabled"] === "true";
+		const handleLinkClick: React.MouseEventHandler<HTMLAnchorElement> = (event) => {
+			if (linkDisabled) {
+				event.preventDefault();
+				event.stopPropagation();
+				return;
+			}
+			linkProps.onClick?.(event);
+		};
+		const handleLinkKeyDown: React.KeyboardEventHandler<HTMLAnchorElement> = (event) => {
+			if (linkDisabled && (event.key === "Enter" || event.key === " ")) {
+				event.preventDefault();
+				event.stopPropagation();
+				return;
+			}
+			linkProps.onKeyDown?.(event);
+		};
+
 		return (
 			<PrimitiveButton
-				{...props}
+				{...linkProps}
 				ref={ref}
+				loading={loading}
+				disabled={linkDisabled || undefined}
+				aria-busy={loading || undefined}
+				aria-disabled={linkDisabled || undefined}
+				tabIndex={linkDisabled ? -1 : linkProps.tabIndex}
+				onClick={handleLinkClick}
+				onKeyDown={handleLinkKeyDown}
 				variant={buttonVariant}
 				className={buttonClassName}
 			>

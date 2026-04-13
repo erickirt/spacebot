@@ -824,21 +824,23 @@ impl SpacebotHook {
         let _ = (tool_name, internal_call_id);
     }
 
-    pub(crate) fn emit_tool_completed_event(&self, tool_name: &str, result: &str) {
+    pub(crate) fn emit_tool_completed_event(&self, tool_name: &str, call_id: String, result: &str) {
         let capped_result =
             crate::tools::truncate_output(result, crate::tools::MAX_TOOL_OUTPUT_BYTES);
-        self.emit_tool_completed_event_from_capped(tool_name, capped_result);
+        self.emit_tool_completed_event_from_capped(tool_name, call_id, capped_result);
     }
 
     pub(crate) fn emit_tool_completed_event_from_capped(
         &self,
         tool_name: &str,
+        call_id: String,
         capped_result: String,
     ) {
         let event = ProcessEvent::ToolCompleted {
             agent_id: self.agent_id.clone(),
             process_id: self.process_id.clone(),
             channel_id: self.channel_id.clone(),
+            call_id,
             tool_name: tool_name.to_string(),
             result: capped_result,
         };
@@ -1236,6 +1238,9 @@ where
             agent_id: self.agent_id.clone(),
             process_id: self.process_id.clone(),
             channel_id: self.channel_id.clone(),
+            call_id: _tool_call_id
+                .clone()
+                .unwrap_or_else(|| _internal_call_id.to_string()),
             tool_name: tool_name.to_string(),
             args: capped_args,
         };
@@ -1294,6 +1299,10 @@ where
             };
         }
 
+        let call_id = _tool_call_id
+            .clone()
+            .unwrap_or_else(|| internal_call_id.to_string());
+
         // Cap the result stored in the broadcast event to avoid blowing up
         // event subscribers with multi-MB tool results. For worker/branch
         // processes, scrub leak patterns from the event payload so secrets
@@ -1302,9 +1311,9 @@ where
             let scrubbed = crate::secrets::scrub::scrub_leaks(result);
             let capped =
                 crate::tools::truncate_output(&scrubbed, crate::tools::MAX_TOOL_OUTPUT_BYTES);
-            self.emit_tool_completed_event_from_capped(tool_name, capped);
+            self.emit_tool_completed_event_from_capped(tool_name, call_id, capped);
         } else {
-            self.emit_tool_completed_event(tool_name, result);
+            self.emit_tool_completed_event(tool_name, call_id, result);
         }
 
         tracing::debug!(

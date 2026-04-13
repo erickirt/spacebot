@@ -209,6 +209,7 @@ pub enum ProcessEvent {
         agent_id: AgentId,
         process_id: ProcessId,
         channel_id: Option<ChannelId>,
+        call_id: String,
         tool_name: String,
         args: String,
     },
@@ -216,6 +217,7 @@ pub enum ProcessEvent {
         agent_id: AgentId,
         process_id: ProcessId,
         channel_id: Option<ChannelId>,
+        call_id: String,
         tool_name: String,
         result: String,
     },
@@ -352,17 +354,20 @@ pub const MEMORY_EVENT_BUS_CAPACITY: usize = 1024;
 /// acceptable for live display.
 pub const TOOL_OUTPUT_BUS_CAPACITY: usize = 1024;
 
+#[derive(Debug, Clone)]
+pub struct ProcessEventBuses {
+    pub control: tokio::sync::broadcast::Sender<ProcessEvent>,
+    pub memory: tokio::sync::broadcast::Sender<ProcessEvent>,
+    pub tool_output: tokio::sync::broadcast::Sender<ProcessEvent>,
+}
+
 /// Create the default set of per-agent process event buses.
 ///
 /// - `event_tx` carries control/lifecycle events consumed by channels and UI.
 /// - `memory_event_tx` carries memory-save telemetry consumed by the cortex.
 /// - `tool_output_tx` carries live tool output (shell stdout/stderr lines)
 ///   consumed by the SSE pipeline for frontend live display.
-pub fn create_process_event_buses() -> (
-    tokio::sync::broadcast::Sender<ProcessEvent>,
-    tokio::sync::broadcast::Sender<ProcessEvent>,
-    tokio::sync::broadcast::Sender<ProcessEvent>,
-) {
+pub fn create_process_event_buses() -> ProcessEventBuses {
     create_process_event_buses_with_capacity(
         CONTROL_EVENT_BUS_CAPACITY,
         MEMORY_EVENT_BUS_CAPACITY,
@@ -375,11 +380,7 @@ pub fn create_process_event_buses_with_capacity(
     control_event_capacity: usize,
     memory_event_capacity: usize,
     tool_output_capacity: usize,
-) -> (
-    tokio::sync::broadcast::Sender<ProcessEvent>,
-    tokio::sync::broadcast::Sender<ProcessEvent>,
-    tokio::sync::broadcast::Sender<ProcessEvent>,
-) {
+) -> ProcessEventBuses {
     let control_event_capacity = control_event_capacity.max(1);
     let memory_event_capacity = memory_event_capacity.max(1);
     let tool_output_capacity = tool_output_capacity.max(1);
@@ -387,7 +388,11 @@ pub fn create_process_event_buses_with_capacity(
     let (memory_event_tx, _memory_event_rx) =
         tokio::sync::broadcast::channel(memory_event_capacity);
     let (tool_output_tx, _tool_output_rx) = tokio::sync::broadcast::channel(tool_output_capacity);
-    (event_tx, memory_event_tx, tool_output_tx)
+    ProcessEventBuses {
+        control: event_tx,
+        memory: memory_event_tx,
+        tool_output: tool_output_tx,
+    }
 }
 
 /// Track lagged broadcast events and return the dropped count when a warning
