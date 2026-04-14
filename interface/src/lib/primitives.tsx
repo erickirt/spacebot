@@ -109,16 +109,15 @@ export const Button = React.forwardRef<
 			linkProps.onKeyDown?.(event);
 		};
 
-		return (
-			<PrimitiveButton
-				{...linkProps}
-				ref={ref}
-				loading={loading}
-				disabled={linkDisabled || undefined}
-				aria-busy={loading || undefined}
-				aria-disabled={linkDisabled || undefined}
-				tabIndex={linkDisabled ? -1 : linkProps.tabIndex}
-				onClick={handleLinkClick}
+			return (
+				<PrimitiveButton
+					{...linkProps}
+					ref={ref}
+					loading={loading}
+					aria-busy={loading || undefined}
+					aria-disabled={linkDisabled || undefined}
+					tabIndex={linkDisabled ? -1 : linkProps.tabIndex}
+					onClick={handleLinkClick}
 				onKeyDown={handleLinkKeyDown}
 				variant={buttonVariant}
 				className={buttonClassName}
